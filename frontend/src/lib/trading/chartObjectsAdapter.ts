@@ -67,6 +67,7 @@ export class CurrentDrawingSource implements ChartObjectDrawingSource, AlertDraw
 const PROFILE_NAMES: Record<ProfileKind, string> = {
   tpo: 'Time Price Opportunity',
   'session-volume-profile': 'Session Volume Profile',
+  'order-flow': 'Order Flow',
 }
 
 /** Profiles are host primitives, so only explicitly supported actions exist. */

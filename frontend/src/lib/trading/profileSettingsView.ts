@@ -13,9 +13,11 @@ export function profileSettingsView(
       ? {
           ...tab,
           description:
-            chartType === 'session-volume-profile'
-              ? 'Volume is estimated from the loaded OHLCV bars. Up/Down volume follows candle direction.'
-              : 'Each letter represents a time block at a price. Profiles use the loaded intraday history.',
+            chartType === 'order-flow'
+              ? 'Live bars use real-time quote ticks as they arrive; historical bars estimate bid/ask volume from loaded OHLCV data.'
+              : chartType === 'session-volume-profile'
+                ? 'Volume is estimated from the loaded OHLCV bars. Up/Down volume follows candle direction.'
+                : 'Each letter represents a time block at a price. Profiles use the loaded intraday history.',
           inputs: [
             ...profileFields(chartType),
             ...tab.inputs.filter((input) => input.group === 'Values'),

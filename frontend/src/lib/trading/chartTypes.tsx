@@ -123,6 +123,7 @@ export const CHART_TYPE_GROUPS: ChartTypeDef[][] = [
       iconKey: 'profile',
       series: 'candlestick',
     },
+    { value: 'order-flow', label: 'Order Flow', iconKey: 'order-flow', series: 'candlestick' },
   ],
 ]
 
@@ -200,6 +201,12 @@ export function chartTypeIcon(iconKey: string): ReactNode {
       return (
         <svg viewBox="0 0 24 24" {...s} strokeWidth={lineStroke24(16)}>
           <path d="M4 3v18M4 6h8M4 10h16M4 14h12M4 18h8M8 4v16M12 4v16M16 8v8M20 8v4" />
+        </svg>
+      )
+    case 'order-flow':
+      return (
+        <svg viewBox="0 0 24 24" {...s} strokeWidth={lineStroke24(16)}>
+          <path d="M4 4h6v4H4M14 4h6v4h-6M4 10h6v4H4M14 10h6v4h-6M4 16h6v4H4M14 16h6v4h-6" />
         </svg>
       )
     case 'profile':

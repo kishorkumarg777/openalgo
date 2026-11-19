@@ -1,0 +1,146 @@
+import { FOOTPRINT_THEMES } from 'openalgo-charts/profile'
+import { describe, expect, it, vi } from 'vitest'
+import { createChartProfile } from './chartProfiles'
+import { OrderFlowFeed } from './orderFlowFeed'
+import {
+  isProfileKind,
+  profileDefaults,
+  profileFields,
+  profileValues,
+  readProfileSettings,
+} from './profileSettings'
+
+const context = { tickSize: 1, exchange: 'NSE', timezone: 'Asia/Kolkata', intervalSeconds: 60 }
+const newFeed = () =>
+  new OrderFlowFeed({ intervalSec: 60, anchorSec: 0, tickSize: 1, rowTicks: 1, minTradeSize: 0 })
+const settings = () => readProfileSettings('order-flow', {})
+
+describe('order flow settings', () => {
+  it('opens as a bid by ask profile with bar cards', () => {
+    expect(settings()).toMatchObject({
+      kind: 'order-flow',
+      displayMode: 'bidask',
+      cellStyle: 'profile',
+      theme: 'default',
+      ticksPerRow: 10,
+      minTradeSize: 0,
+      stackedImbalances: 3,
+    })
+  })
+
+  it('keeps its own namespace, apart from the other profiles', () => {
+    expect(profileDefaults('order-flow')).toHaveProperty('profiles.of.ticksPerRow')
+    expect(profileDefaults('order-flow')).not.toHaveProperty('profiles.tpo.ticksPerRow')
+    expect(profileDefaults('tpo')).not.toHaveProperty('profiles.of.ticksPerRow')
+    expect(profileValues('order-flow', { 'profiles.tpo.ticksPerRow': 77 })).toHaveProperty(
+      'profiles.of.ticksPerRow',
+      10
+    )
+  })
+
+  it('falls back to a safe value for anything it cannot use', () => {
+    const read = readProfileSettings('order-flow', {
+      'profiles.of.displayMode': 'nope',
+      'profiles.of.theme': 'daylight',
+      'profiles.of.ticksPerRow': 0,
+      'profiles.of.minTradeSize': -5,
+      'profiles.of.imbalanceRatio': 'abc',
+    })
+    expect(read.displayMode).toBe('bidask')
+    expect(read.theme).toBe('daylight')
+    expect(read.ticksPerRow).toBe(1)
+    expect(read.minTradeSize).toBe(0)
+    expect(read.imbalanceRatio).toBe(3)
+  })
+
+  it('is a registered profile chart type', () => {
+    expect(isProfileKind('order-flow')).toBe(true)
+  })
+
+  it('offers only colors the footprint library has', () => {
+    const field = profileFields('order-flow').find((f) => f.key === 'profiles.of.theme') as
+      | { options: { value: string }[] }
+      | undefined
+    expect(field?.options.length).toBeGreaterThan(0)
+    for (const option of field?.options ?? []) {
+      expect(option.value === 'default' || option.value in FOOTPRINT_THEMES).toBe(true)
+    }
+  })
+})
+
+describe('order flow profile', () => {
+  it('draws nothing, and fails nowhere, while the feed has not loaded', () => {
+    const profile = createChartProfile('order-flow', settings(), context)
+    profile.attached?.({ requestUpdate: vi.fn() })
+    expect(() => profile.setBars([])).not.toThrow()
+    expect(profile.warning()).toBeNull()
+    expect(profile.contextMenuAt(10, 10)).toBeNull()
+  })
+
+  it('reads its bars from the feed and asks the chart to redraw', () => {
+    const feed = newFeed()
+    feed.ingest({ ltp: 100, ltq: 5, timeSec: 10 })
+    const requestUpdate = vi.fn()
+    const profile = createChartProfile('order-flow', settings(), {
+      ...context,
+      orderFlow: () => feed,
+    })
+    profile.attached?.({ requestUpdate })
+    profile.setBars([])
+    expect(requestUpdate).toHaveBeenCalled()
+  })
+
+  it('applies the row size in the settings to what has already traded', () => {
+    const feed = newFeed()
+    feed.ingest({ ltp: 100, ltq: 5, timeSec: 10 })
+    feed.ingest({ ltp: 103, ltq: 5, timeSec: 11 })
+    expect(feed.bars()[0].cells.length).toBe(2)
+    createChartProfile(
+      'order-flow',
+      { ...settings(), ticksPerRow: 10 },
+      {
+        ...context,
+        orderFlow: () => feed,
+      }
+    )
+    expect(feed.bars()[0].cells.length).toBe(1)
+  })
+
+  it('tells a trader when the symbol sends no traded quantity', () => {
+    const feed = newFeed()
+    for (let i = 0; i < 80; i++) feed.ingest({ ltp: 100 + i, timeSec: i })
+    const profile = createChartProfile('order-flow', settings(), {
+      ...context,
+      orderFlow: () => feed,
+    })
+    expect(profile.warning()).toContain('No traded quantity')
+  })
+
+  it('rejects settings of another profile kind', () => {
+    expect(() =>
+      createChartProfile('order-flow', readProfileSettings('tpo', {}), context)
+    ).toThrow()
+  })
+
+  it('builds footprint bars from historical OHLCV bars and lets live feed bars override them', () => {
+    const feed = newFeed()
+    feed.ingest({ ltp: 102, ltq: 10, timeSec: 60 })
+    feed.ingest({ ltp: 103, ltq: 15, timeSec: 65 })
+    const profile = createChartProfile('order-flow', { ...settings(), ticksPerRow: 1 }, {
+      ...context,
+      orderFlow: () => feed,
+    })
+    profile.attached?.({ requestUpdate: vi.fn() })
+    profile.setBars([
+      { time: 0, open: 100, high: 104, low: 99, close: 103, volume: 100 },
+      { time: 60, open: 102, high: 103, low: 102, close: 103, volume: 500 },
+      { time: 120, open: 103, high: 103, low: 103, close: 103, volume: 0 },
+    ])
+    const fp = (profile as unknown as { footprint: { _bars: { time: number; delta: number; cells: unknown[] }[] } }).footprint
+    expect(fp._bars.map((b) => b.time)).toEqual([0, 60])
+    expect(fp._bars[0].cells.length).toBeGreaterThan(0)
+    expect(fp._bars[0].delta).toBeGreaterThan(0)
+    // Bar at time 60 comes from the live feed (25 total qty), not the 500 historical volume.
+    expect(fp._bars[1].cells).toEqual(feed.bars()[0].cells)
+  })
+})

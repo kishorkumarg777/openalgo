@@ -67,6 +67,7 @@ import {
   TextWatermark,
   tryResolveInterval,
   utcSecondsToZonedDateString,
+  type WsMode,
   withBarCache,
 } from 'openalgo-charts'
 import type {
@@ -289,6 +290,7 @@ import {
 } from './legend'
 import { fileForScriptId, isScriptInstance } from './openscriptFiles'
 import { loadOpenScriptStudies, SCRIPT_ALERT_EVENT } from './openscriptStudies'
+import type { OrderFlowFeed } from './orderFlowFeed'
 import { profileIntervalSupported, selectProfileInterval } from './profileIntervals'
 import { ProfileLayer, type ProfileMenuAction } from './profileLayer'
 import {
@@ -989,6 +991,7 @@ export function buildOrderTicket(input: {
   }
 }
 const VISIBLE_BARS = 120
+const ORDER_FLOW_VISIBLE_BARS = 8
 /** Empty bars kept between the newest candle and the price axis. */
 const RIGHT_PAD_BARS = 4
 
@@ -1218,6 +1221,14 @@ export class TradingTerminal {
   private offLegendActions: (() => void) | null = null
   private offReplayPointer: (() => void) | null = null
   private depthActive = false
+  /** The one live subscription this chart holds, so a mode change can drop the old one. */
+  private liveSub: { mode: WsMode; symbol: string; exchange: string } | null = null
+  /**
+   * Order Flow only: the live footprint feed. It belongs to the chart, not to the
+   * profile, so a settings change or a rebuild keeps the bars gathered so far.
+   */
+  private orderFlowFeed: OrderFlowFeed | null = null
+  private orderFlowGeneration = 0
 
   private rawBars: Bar[] = []
   /**
@@ -1770,6 +1781,31 @@ export class TradingTerminal {
     this.setVolumeData(drawn, volumeUnderElements(drawn, raw))
   }
 
+  private orderFlowBarTimes(): Set<number> | null {
+    if (this.ctype !== 'order-flow' || !this.orderFlowFeed) return null
+    const bars = this.orderFlowFeed.bars()
+    if (!bars.length) return null
+    const times = new Set<number>()
+    for (const bar of bars) {
+      if (bar.cells.length > 0) times.add(bar.time)
+    }
+    return times.size ? times : null
+  }
+
+  private priceBarForDisplay(bar: Bar, footprintTimes = this.orderFlowBarTimes()): Bar {
+    const hasFootprint =
+      this.ctype === 'order-flow' &&
+      (footprintTimes?.has(bar.time) ||
+        (typeof bar.volume === 'number' && Number.isFinite(bar.volume) && bar.volume > 0))
+    if (!hasFootprint) return bar
+    return {
+      ...bar,
+      color: 'transparent',
+      wickColor: 'transparent',
+      borderColor: 'transparent',
+    }
+  }
+
   private setPriceData() {
     // History can finish during replay. Keep its live snapshot up to date,
     // but leave both displayed series and their timeline to the playhead.
@@ -1777,7 +1813,12 @@ export class TradingTerminal {
     if (!this.price || !this.volume || !this.rawBars.length) return
     // Always the raw bars. On a transformed chart type the chart forms the
     // elements from them, so a tick, history paging and replay all speak bars.
-    this.price.setData(this.rawBars)
+    const footprintTimes = this.orderFlowBarTimes()
+    const priceBars =
+      this.ctype === 'order-flow'
+        ? this.rawBars.map((b) => this.priceBarForDisplay(b, footprintTimes))
+        : this.rawBars
+    this.price.setData(priceBars)
     if (this.transformed()) this.setTransformedVolume(this.rawBars)
     else this.setVolumeData(this.rawBars)
     this.shownCount = this.shownBars.length
@@ -1871,7 +1912,7 @@ export class TradingTerminal {
     if (!this.price || !this.volume) return false
     // `update` appends or replaces by time on its own, which is exactly the
     // append-or-replace the caller has already applied to `rawBars`.
-    this.price.update(bar)
+    this.price.update(this.priceBarForDisplay(bar))
     if (this.transformed()) {
       this.setTransformedVolume(this.rawBars)
       this.shownCount = this.shownBars.length
@@ -2379,8 +2420,21 @@ export class TradingTerminal {
       timezone: chart.timezone(),
       intervalSeconds: intervalSeconds(this.interval) ?? 300,
       priceScale: () => price.priceScale(),
+      orderFlow: () => this.orderFlowFeed,
     }
-    this.hideProfileSeries()
+    if (kind === 'order-flow' && this.sym?.quoteOnly) {
+      this.toast(
+        'Order Flow needs traded quantity, which indices do not carry. Pick a stock, future or option.',
+        ''
+      )
+    }
+    // Keep candlesticks visible on Order Flow for bars without footprint data;
+    // bars that do have footprint cells are hidden per-bar so Footprint draws them.
+    if (kind === 'order-flow') {
+      this.volume?.applyOptions({ visible: false })
+    } else {
+      this.hideProfileSeries()
+    }
     this.profileLayer = new ProfileLayer({
       host: {
         addPrimitive: (primitive) => chart.addPrimitive(primitive, 0),
@@ -2477,6 +2531,8 @@ export class TradingTerminal {
     this.chart = createChart(this.container, {
       priceAxisWidth: 78,
       theme,
+      // Order Flow columns need wide bars (>68px) to display bid/ask numbers and bar cards.
+      timeScale: this.ctype === 'order-flow' ? { maxBarSpacing: 220 } : undefined,
       // No `navigation` override. The engine's default is `mousePan: 'both'`,
       // and this used to pin it to `'horizontal'`, so dragging the plot moved
       // through time and never through price. It was set with the 2.4.5
@@ -4901,10 +4957,11 @@ export class TradingTerminal {
       ...this.chartDefaults,
       ...profileDefaults('tpo'),
       ...profileDefaults('session-volume-profile'),
+      ...profileDefaults('order-flow'),
       ...VOLUME_DEFAULTS,
       ...PRICE_AXIS_DEFAULTS,
     }
-    for (const kind of ['tpo', 'session-volume-profile'] as const) {
+    for (const kind of ['tpo', 'session-volume-profile', 'order-flow'] as const) {
       const normalized = profileValues(kind, merged)
       for (const key of Object.keys(normalized)) {
         if (key in merged) merged[key] = normalized[key]
@@ -6444,16 +6501,20 @@ export class TradingTerminal {
         return
       }
       try {
-        const j = await this.api<{ data?: { ltp?: number; bid?: number; ask?: number } }>(
-          'quotes',
-          {
-            symbol: this.sym.symbol,
-            exchange: this.sym.exchange,
-          }
-        )
+        const j = await this.api<{
+          data?: { ltp?: number; bid?: number; ask?: number; volume?: number }
+        }>('quotes', {
+          symbol: this.sym.symbol,
+          exchange: this.sym.exchange,
+        })
         const q = j.data || {}
         if (typeof q.ltp === 'number' && q.ltp > 0)
-          this.onTick({ symbol: this.sym.symbol, ltp: q.ltp, timeSec: nowSec() })
+          this.onTick({
+            symbol: this.sym.symbol,
+            ltp: q.ltp,
+            volume: q.volume,
+            timeSec: nowSec(),
+          })
         if (!this.sym.quoteOnly) this.priceAxis.setQuote(q.bid, q.ask)
         if (
           this.tradeBtns &&
@@ -6479,10 +6540,28 @@ export class TradingTerminal {
   }
 
   /* single tick path shared by WS pushes and the REST fallback */
-  private onTick(e: { symbol?: string; ltp: number; ltq?: number; timeSec?: number }) {
+  private onTick(e: {
+    symbol?: string
+    ltp: number
+    ltq?: number
+    volume?: number
+    timeSec?: number
+  }) {
     if (!this.sym || (e.symbol && e.symbol !== this.sym.symbol)) return
     this.lastLtp = e.ltp
     this.cb.onLtp(e.ltp)
+    const tickTime = e.timeSec || nowSec()
+    // Order Flow reads quantity off the same tick. Only a recorded trade moves it.
+    if (
+      this.orderFlowFeed?.ingest({
+        ltp: e.ltp,
+        ltq: e.ltq,
+        volume: e.volume,
+        timeSec: tickTime,
+      })
+    ) {
+      this.profileLayer?.refresh()
+    }
     // Recolour with the price: the line belongs to the forming candle, so it
     // follows that candle's direction rather than sitting amber forever.
     if (this.position && this.posLine) this.posLine.setLeftLabel(this.posLabel())
@@ -6490,7 +6569,7 @@ export class TradingTerminal {
     if (this.builder) {
       let u
       try {
-        u = this.builder.onTick({ time: e.timeSec || nowSec(), price: e.ltp, ltq: e.ltq })
+        u = this.builder.onTick({ time: tickTime, price: e.ltp, ltq: e.ltq })
       } catch {
         return
       } // A late after-hours quote must not open a new session candle.
@@ -6613,11 +6692,58 @@ export class TradingTerminal {
     })
     // One subscription per symbol, mode picked by instrument type: indices
     // have no order book (LTP), tradeables get Depth which embeds ltp.
-    if (this.sym.quoteOnly) {
-      this.ws.subscribe('LTP', this.sym.symbol, this.sym.exchange)
-    } else {
-      this.ws.subscribe('Depth', this.sym.symbol, this.sym.exchange, 5)
+    // Order Flow needs a traded quantity, which only Quote mode carries, so it
+    // takes Quote in place of Depth. It is still one subscription per symbol,
+    // which is the rule the Depth-only design exists to keep (issue #1664).
+    const mode: WsMode = this.sym.quoteOnly
+      ? 'LTP'
+      : this.ctype === 'order-flow'
+        ? 'Quote'
+        : 'Depth'
+    const previous = this.liveSub
+    if (
+      previous &&
+      (previous.mode !== mode ||
+        previous.symbol !== this.sym.symbol ||
+        previous.exchange !== this.sym.exchange)
+    ) {
+      try {
+        this.ws.unsubscribe(previous.mode, previous.symbol, previous.exchange)
+      } catch {
+        /* not subscribed */
+      }
     }
+    this.startOrderFlowFeed(sec)
+    if (mode === 'Depth') this.ws.subscribe('Depth', this.sym.symbol, this.sym.exchange, 5)
+    else this.ws.subscribe(mode, this.sym.symbol, this.sym.exchange)
+    this.liveSub = { mode, symbol: this.sym.symbol, exchange: this.sym.exchange }
+  }
+
+  /**
+   * Start a fresh Order Flow feed for the symbol and interval now on the chart,
+   * or drop it on any other chart type. The feed loads on demand because it
+   * brings the profile tier with it.
+   */
+  private startOrderFlowFeed(intervalSec: number | null): void {
+    const generation = ++this.orderFlowGeneration
+    this.orderFlowFeed = null
+    if (this.ctype !== 'order-flow' || !intervalSec) return
+    const anchorSec = this.rawBars[this.rawBars.length - 1]?.time ?? 0
+    const tickSize = this.tick()
+    const saved = readProfileSettings('order-flow', this.chartSettingsSaved)
+    void import('./orderFlowFeed')
+      .then(({ OrderFlowFeed }) => {
+        if (generation !== this.orderFlowGeneration || this.destroyed) return
+        this.orderFlowFeed = new OrderFlowFeed({
+          intervalSec,
+          anchorSec,
+          tickSize,
+          rowTicks: saved.ticksPerRow,
+          minTradeSize: saved.minTradeSize,
+        })
+        this.profileLayer?.refresh(true)
+      })
+      .catch((error) => this.toast(`Order Flow could not start: ${this.cleanError(error)}`, 'err'))
   }
 
   /* ── live data for a combination: one LTP stream per leg, folded per tick ── */
@@ -7010,11 +7136,16 @@ export class TradingTerminal {
           this.legSubs = []
           this.legLtp.clear()
           this.expr = null
-        } else if (this.sym.quoteOnly) {
-          this.ws.unsubscribe('LTP', this.sym.symbol, this.sym.exchange)
         } else {
-          this.ws.unsubscribe('Depth', this.sym.symbol, this.sym.exchange)
+          // The mode this chart actually subscribed in: LTP for an index, Quote
+          // on Order Flow, Depth otherwise.
+          this.ws.unsubscribe(
+            this.liveSub?.mode ?? (this.sym.quoteOnly ? 'LTP' : 'Depth'),
+            this.sym.symbol,
+            this.sym.exchange
+          )
         }
+        this.liveSub = null
       } catch {
         /* not subscribed */
       }
@@ -7169,7 +7300,9 @@ export class TradingTerminal {
       this.toast(
         this.ctype === 'tpo'
           ? 'Choose an intraday interval that divides the TPO block size'
-          : 'Session Volume Profile requires an intraday interval',
+          : this.ctype === 'order-flow'
+            ? 'Order Flow requires an intraday interval'
+            : 'Session Volume Profile requires an intraday interval',
         'err'
       )
       return this.interval
@@ -7192,13 +7325,21 @@ export class TradingTerminal {
       return this.ctype
     }
     this.stopReplay()
+    const wasOrderFlow = this.ctype === 'order-flow'
     this.ctype = v
     this.lsSet('ctype', v)
     this.cb.onChartTypeChange?.(v)
     if (interval !== this.interval) {
       this.setInterval(interval)
       this.toast(`Using ${interval} bars for ${CHART_TYPES[v].label}`, '')
-    } else if (this.rawBars.length) this.buildChart()
+    } else if (this.rawBars.length) {
+      this.buildChart()
+      // Order Flow rides the quote feed and every other type the depth feed, so
+      // crossing between them changes what the chart subscribes to.
+      if ((v === 'order-flow') !== wasOrderFlow && this.sym && !this.sym.synthetic) {
+        this.connectLive()
+      }
+    }
     return v
   }
   setProduct(p: string) {
@@ -7267,11 +7408,15 @@ export class TradingTerminal {
    */
   private applyDefaultViewport(): void {
     if (!this.chart) return
-    if (this.shownCount > VISIBLE_BARS) {
-      const to = this.shownCount - 1 + RIGHT_PAD_BARS
-      this.chart.timeScale.setVisibleLogicalRange({ from: to - VISIBLE_BARS, to })
-    } else if (this.chart.timeScale.barSpacing > 14) {
-      this.chart.timeScale.setBarSpacing(14)
+    const isOrderFlow = this.ctype === 'order-flow'
+    const visibleBars = isOrderFlow ? ORDER_FLOW_VISIBLE_BARS : VISIBLE_BARS
+    const rightPad = isOrderFlow ? 1 : RIGHT_PAD_BARS
+    const maxSpacing = isOrderFlow ? 120 : 14
+    if (this.shownCount > visibleBars) {
+      const to = this.shownCount - 1 + rightPad
+      this.chart.timeScale.setVisibleLogicalRange({ from: to - visibleBars, to })
+    } else if (this.chart.timeScale.barSpacing > maxSpacing || isOrderFlow) {
+      this.chart.timeScale.setBarSpacing(maxSpacing)
     }
   }
 
@@ -8058,6 +8203,8 @@ export class TradingTerminal {
     this.replayInvalidation = null
     if (this.workspaceReplayMember || this.workspaceReplayPick) this.stopReplay()
     this.destroyed = true
+    this.orderFlowGeneration += 1
+    this.orderFlowFeed = null
     let comparisonError: unknown
     let comparisonFailed = false
     try {

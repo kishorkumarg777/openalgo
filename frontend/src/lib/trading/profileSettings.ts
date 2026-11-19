@@ -1,6 +1,6 @@
 import type { ChartSettingsField } from './terminal'
 
-export type ProfileKind = 'tpo' | 'session-volume-profile'
+export type ProfileKind = 'tpo' | 'session-volume-profile' | 'order-flow'
 
 type Value = string | number | boolean
 type Values = Record<string, Value>
@@ -219,18 +219,99 @@ const svp = {
   ...sessions,
 } satisfies Record<string, Setting>
 
+// Order Flow. Quantities and sides come from the live quote feed (see
+// orderFlowFeed.ts), so these settings shape how that feed is drawn and grouped.
+const orderFlow = {
+  displayMode: choice<
+    'bidask' | 'imbalance' | 'delta' | 'deltaPct' | 'volume' | 'volumeDelta' | 'deltaShadedVolume'
+  >(
+    'Cell values',
+    'bidask',
+    [
+      ['bidask', 'Bid x Ask'],
+      ['imbalance', 'Imbalance'],
+      ['delta', 'Delta'],
+      ['deltaPct', 'Delta %'],
+      ['volume', 'Volume'],
+      ['volumeDelta', 'Volume x Delta'],
+      ['deltaShadedVolume', 'Volume shaded by delta'],
+    ],
+    'Order flow display'
+  ),
+  cellStyle: choice<'heatmap' | 'profile' | 'ladder'>(
+    'Style',
+    'profile',
+    [
+      ['profile', 'Profile'],
+      ['ladder', 'Cluster ladder'],
+      ['heatmap', 'Heatmap'],
+    ],
+    'Order flow display'
+  ),
+  theme: choice<'default' | 'ocean' | 'ember' | 'forest' | 'neon' | 'monochrome' | 'daylight'>(
+    'Colors',
+    'default',
+    [
+      ['default', 'Chart theme (Green / Red)'],
+      ['ocean', 'Ocean'],
+      ['ember', 'Ember'],
+      ['forest', 'Forest'],
+      ['neon', 'Neon'],
+      ['monochrome', 'Monochrome'],
+      ['daylight', 'Daylight (light chart)'],
+    ],
+    'Order flow display'
+  ),
+  showPoc: boolean('POC', true, 'Order flow display'),
+  showValueArea: boolean('Value area', true, 'Order flow display'),
+  showBarCards: boolean('Cards under each bar', true, 'Order flow display'),
+  showSummaryTable: boolean('Bottom summary table (Vol / Delta / CVD)', false, 'Order flow display'),
+  showVisibleProfile: boolean('Visible volume profile', false, 'Order flow display'),
+  showEmptyRows: boolean('Rows with no trades', true, 'Order flow display'),
+  textColorMode: choice<'contrast' | 'side' | 'delta' | 'dominant' | 'imbalance' | 'volume'>(
+    'Text color',
+    'contrast',
+    [
+      ['contrast', 'Auto contrast'],
+      ['side', 'Bid / Ask side'],
+      ['delta', 'Row delta'],
+      ['dominant', 'Dominant side'],
+      ['imbalance', 'Imbalance'],
+      ['volume', 'Volume'],
+    ],
+    'Order flow display'
+  ),
+  volumeDivisor: numeric('Show quantities in units of', 1, 1, 100000, 'Order flow display'),
+  ticksPerRow: numeric('Ticks per row', 10, 1, 10000, 'Order flow calculation'),
+  minTradeSize: numeric('Smallest print counted', 0, 0, 1_000_000, 'Order flow calculation'),
+  valueAreaPercent: numeric('Value area (%)', 70, 1, 100, 'Order flow calculation'),
+  imbalanceRatio: numeric('Imbalance ratio', 3, 1, 100, 'Order flow imbalance'),
+  imbalanceThreshold: numeric(
+    'Imbalance minimum quantity',
+    0,
+    0,
+    1_000_000,
+    'Order flow imbalance'
+  ),
+  stackedImbalances: numeric('Stacked imbalance rows (0 off)', 3, 0, 20, 'Order flow imbalance'),
+  showZones: boolean('Stacked imbalance zones', false, 'Order flow imbalance'),
+} satisfies Record<string, Setting>
+
 export type TpoProfileSettings = SettingsOf<typeof tpo> & { kind: 'tpo' }
 export type SessionVolumeProfileSettings = SettingsOf<typeof svp> & {
   kind: 'session-volume-profile'
 }
-export type ProfileSettings = TpoProfileSettings | SessionVolumeProfileSettings
+export type OrderFlowSettings = SettingsOf<typeof orderFlow> & { kind: 'order-flow' }
+export type ProfileSettings = TpoProfileSettings | SessionVolumeProfileSettings | OrderFlowSettings
 
 function definitions(kind: ProfileKind): Record<string, Setting> {
-  return kind === 'tpo' ? tpo : svp
+  if (kind === 'tpo') return tpo
+  return kind === 'order-flow' ? orderFlow : svp
 }
 
 function prefix(kind: ProfileKind): string {
-  return kind === 'tpo' ? 'profiles.tpo.' : 'profiles.svp.'
+  if (kind === 'tpo') return 'profiles.tpo.'
+  return kind === 'order-flow' ? 'profiles.of.' : 'profiles.svp.'
 }
 
 function normalize(setting: Setting, value: unknown): Value {
@@ -297,6 +378,10 @@ export function readProfileSettings(
   persisted: Record<string, unknown>
 ): SessionVolumeProfileSettings
 export function readProfileSettings(
+  kind: 'order-flow',
+  persisted: Record<string, unknown>
+): OrderFlowSettings
+export function readProfileSettings(
   kind: ProfileKind,
   persisted: Record<string, unknown>
 ): ProfileSettings
@@ -353,5 +438,5 @@ export function profileFields(kind: ProfileKind): ChartSettingsField[] {
 }
 
 export function isProfileKind(kind: string): kind is ProfileKind {
-  return kind === 'tpo' || kind === 'session-volume-profile'
+  return kind === 'tpo' || kind === 'session-volume-profile' || kind === 'order-flow'
 }

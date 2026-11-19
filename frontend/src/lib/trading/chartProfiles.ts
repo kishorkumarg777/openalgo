@@ -12,21 +12,32 @@ import {
   compactVol,
   computeMarketProfile,
   computeVolumeProfileSessions,
+  FOOTPRINT_THEMES,
+  Footprint,
+  type FootprintBar,
+  type FootprintCell,
+  type FootprintOptions,
   inWindow,
   MarketProfile,
   type MarketProfilePrimitiveOptions,
   type MarketProfileResult,
+  priceBuckets,
   type SessionWindow,
   tpoLetter,
   type VolumeProfileSessionResult,
 } from 'openalgo-charts/profile'
+import type { OrderFlowFeed } from './orderFlowFeed'
 import type { ProfileMenuAction } from './profileLayer'
 import type {
+  OrderFlowSettings,
   ProfileKind,
   ProfileSettings,
   SessionVolumeProfileSettings,
   TpoProfileSettings,
 } from './profileSettings'
+
+/** The settings of the two profiles that are built from the chart's own bars. */
+type SessionProfileSettings = TpoProfileSettings | SessionVolumeProfileSettings
 
 export interface ChartProfileContext {
   tickSize: number
@@ -35,6 +46,11 @@ export interface ChartProfileContext {
   intervalSeconds: number
   /** Resolve the primary series scale after a left/right/overlay axis move. */
   priceScale?: () => PrimitiveRenderContext['priceScale']
+  /**
+   * Order Flow only: the live feed the terminal owns. A getter, because the feed
+   * loads on demand and outlives the profile, so a chart rebuild keeps the bars.
+   */
+  orderFlow?: () => OrderFlowFeed | null
 }
 
 export interface ChartProfile extends IPrimitive {
@@ -90,7 +106,7 @@ function minute(value: string): number {
   return hour * 60 + min
 }
 
-function customWindow(settings: ProfileSettings, zone: string): SessionWindow | undefined {
+function customWindow(settings: SessionProfileSettings, zone: string): SessionWindow | undefined {
   return settings.sessionMode === 'custom'
     ? { startMinute: minute(settings.sessionStart), endMinute: minute(settings.sessionEnd), zone }
     : undefined
@@ -108,7 +124,7 @@ function sessionDay(time: number, zone: string, window?: SessionWindow): number 
 
 function groupBars(
   bars: readonly Bar[],
-  settings: ProfileSettings,
+  settings: SessionProfileSettings,
   context: ChartProfileContext
 ): Map<string, Bar[]> {
   const zone = sessionZone(context)
@@ -183,7 +199,7 @@ function unchangedPrefix(a: readonly Bar[], b: readonly Bar[]): number {
 
 function rowSizeFor(
   bars: readonly Bar[],
-  settings: ProfileSettings,
+  settings: SessionProfileSettings,
   context: ChartProfileContext
 ): { size: number; limited: boolean } {
   const tick =
@@ -400,15 +416,15 @@ export class ProfileSessionStore {
   sessions: readonly ProfileSession[] = []
   warning: string | null = null
   private cache = new Map<string, ProfileSession>()
-  private settings: ProfileSettings
+  private settings: SessionProfileSettings
   private context: ChartProfileContext
 
-  constructor(settings: ProfileSettings, context: ChartProfileContext) {
+  constructor(settings: SessionProfileSettings, context: ChartProfileContext) {
     this.settings = settings
     this.context = context
   }
 
-  setSettings(settings: ProfileSettings, context = this.context): void {
+  setSettings(settings: SessionProfileSettings, context = this.context): void {
     if (
       JSON.stringify(settings) !== JSON.stringify(this.settings) ||
       JSON.stringify(context) !== JSON.stringify(this.context)
@@ -593,7 +609,7 @@ function drawLevels(
   rc: PrimitiveRenderContext,
   bounds: SessionBounds,
   values: { poc: number; vah: number; val: number },
-  settings: ProfileSettings
+  settings: SessionProfileSettings
 ): void {
   if (settings.showVah)
     horizontalLine(ctx, rc, bounds, values.vah, settings.vahColor, settings.extendVah)
@@ -770,7 +786,10 @@ interface NativeSession {
   viewEnd: number
 }
 
-function splitSettingsIdentity(settings: ProfileSettings, context: ChartProfileContext): string {
+function splitSettingsIdentity(
+  settings: SessionProfileSettings,
+  context: ChartProfileContext
+): string {
   return JSON.stringify({
     context,
     kind: settings.kind,
@@ -803,10 +822,10 @@ class SessionChartProfile implements ChartProfile {
   private sessionTokens = new Map<string, symbol>()
   private painted = new Map<ProfileSession, NativeSession>()
   private plotSize: { width: number; height: number } | null = null
-  private settings: ProfileSettings
+  private settings: SessionProfileSettings
   private context: ChartProfileContext
 
-  constructor(settings: ProfileSettings, context: ChartProfileContext) {
+  constructor(settings: SessionProfileSettings, context: ChartProfileContext) {
     this.settings = settings
     this.context = context
     this.store = new ProfileSessionStore(settings, context)
@@ -884,7 +903,7 @@ class SessionChartProfile implements ChartProfile {
     this.plotSize = null
   }
 
-  setSettings(settings: ProfileSettings, context = this.context): void {
+  setSettings(settings: SessionProfileSettings, context = this.context): void {
     if (
       splitSettingsIdentity(settings, context) !==
       splitSettingsIdentity(this.settings, this.context)
@@ -1110,11 +1129,232 @@ class SessionChartProfile implements ChartProfile {
   }
 }
 
+/** The library's footprint options for these settings. Row height comes from each bar. */
+function footprintOptions(
+  settings: OrderFlowSettings,
+  context: ChartProfileContext
+): Partial<FootprintOptions> {
+  const themeColors = settings.theme === 'default' ? {} : FOOTPRINT_THEMES[settings.theme]
+  return {
+    ...themeColors,
+    displayMode: settings.displayMode,
+    cellStyle: settings.cellStyle,
+    textColorMode: settings.textColorMode,
+    minTextHeight: 8,
+    timezone: context.timezone,
+    cvdReset: 'session',
+    volumeDivisor: settings.volumeDivisor,
+    showPoc: settings.showPoc,
+    pocStyle: 'outline',
+    pocColor: '#e2e8f0',
+    showValueArea: settings.showValueArea,
+    // The footprint takes a fraction of volume; the setting is a percentage.
+    valueAreaPercent: settings.valueAreaPercent / 100,
+    showDeltaLabels: false,
+    statsPosition: 'bar',
+    statsRows: settings.showBarCards ? ['volume', 'delta', 'deltaPct'] : [],
+    tableRows: settings.showSummaryTable ? ['volume', 'delta', 'deltaPct', 'cvd'] : [],
+    showVisibleProfile: settings.showVisibleProfile,
+    showEmptyRows: settings.showEmptyRows,
+    imbalanceRatio: settings.imbalanceRatio,
+    imbalanceThreshold: settings.imbalanceThreshold,
+    stackedImbalances: settings.stackedImbalances,
+    showZones: settings.showZones,
+  }
+}
+
+/**
+ * Approximate a FootprintBar from a historical OHLCV bar when live tick data
+ * is unavailable. Volume is distributed across price rows with a slight body
+ * weight and split into bid/ask using the bar's close position in [low, high].
+ */
+function buildHistoricalFootprintBar(bar: Bar, rowSize: number): FootprintBar | null {
+  if (
+    !(rowSize > 0) ||
+    !Number.isFinite(rowSize) ||
+    ![bar.time, bar.open, bar.high, bar.low, bar.close].every(Number.isFinite) ||
+    bar.high < bar.low ||
+    !(typeof bar.volume === 'number' && Number.isFinite(bar.volume) && bar.volume > 0)
+  ) {
+    return null
+  }
+  const span = bar.high - bar.low
+  const step = span / rowSize > MAX_PROFILE_ROWS ? span / MAX_PROFILE_ROWS : rowSize
+  const buckets = priceBuckets(bar.low, bar.high, step)
+  if (!buckets.length) return null
+
+  const askRatio =
+    span > 0
+      ? Math.min(0.85, Math.max(0.15, 0.2 + 0.6 * ((bar.close - bar.low) / span)))
+      : bar.close > bar.open
+        ? 0.7
+        : bar.close < bar.open
+          ? 0.3
+          : 0.5
+
+  const midBody = (bar.open + bar.close) * 0.5
+  const halfSpan = Math.max(step, span * 0.5)
+  const weights = buckets.map((price, idx) => {
+    const dist = Math.abs(price - midBody) / halfSpan
+    const bell = Math.exp(-1.8 * dist * dist)
+    // Slight deterministic variation so adjacent rows form natural POC/imbalances.
+    const ripple = 0.75 + 0.5 * (((idx * 7 + Math.round(bar.time)) % 5) / 4)
+    return bell * ripple
+  })
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0)
+
+  const cells: FootprintCell[] = []
+  let delta = 0
+  for (let i = 0; i < buckets.length; i++) {
+    const rowVol = (bar.volume * weights[i]) / totalWeight
+    const total = Math.round(rowVol)
+    // Tilt bid/ask by row position and allow occasional one-sided rows near extremes.
+    const rowPos = buckets.length > 1 ? i / (buckets.length - 1) : 0.5
+    const hash = Math.abs(Math.round(bar.time) * 31 + i * 17) % 11
+    let rowAskRatio = Math.min(0.92, Math.max(0.08, askRatio + (rowPos - 0.5) * 0.25))
+    if (hash === 0) rowAskRatio = 0
+    else if (hash === 10) rowAskRatio = 1
+    const askVol = Math.round(rowVol * rowAskRatio)
+    const bidVol = Math.max(0, total - askVol)
+    if (askVol > 0 || bidVol > 0) {
+      cells.push({ price: buckets[i], bidVol, askVol })
+      delta += askVol - bidVol
+    }
+  }
+  if (!cells.length) {
+    const askVol = Math.round(bar.volume * askRatio)
+    const bidVol = Math.max(0, Math.round(bar.volume) - askVol)
+    const fallbackPrice = buckets[Math.floor(buckets.length / 2)]
+    cells.push({ price: fallbackPrice, bidVol, askVol })
+    delta = askVol - bidVol
+  }
+
+  return {
+    time: bar.time,
+    cells,
+    delta,
+    rowSize: step,
+    open: bar.open,
+    high: bar.high,
+    low: bar.low,
+    close: bar.close,
+  }
+}
+
+/**
+ * Order Flow: the library's footprint, fed by the terminal's live feed for
+ * real-time bars and approximated from OHLCV history for older bars.
+ */
+class OrderFlowChartProfile implements ChartProfile {
+  private footprint: Footprint
+  private host: PrimitiveHost | null = null
+  private settings: OrderFlowSettings
+  private context: ChartProfileContext
+  private sourceBars: readonly Bar[] = []
+  private historicalCache = new Map<number, { key: string; fp: FootprintBar | null }>()
+
+  constructor(settings: OrderFlowSettings, context: ChartProfileContext) {
+    this.settings = settings
+    this.context = context
+    this.footprint = new Footprint(footprintOptions(settings, context))
+    this.sync()
+  }
+
+  private feed(): OrderFlowFeed | null {
+    return this.context.orderFlow?.() ?? null
+  }
+
+  private historicalBar(bar: Bar, rowSize: number): FootprintBar | null {
+    const key = `${bar.open}|${bar.high}|${bar.low}|${bar.close}|${bar.volume ?? 0}|${rowSize}`
+    const cached = this.historicalCache.get(bar.time)
+    if (cached && cached.key === key) return cached.fp
+    const fp = buildHistoricalFootprintBar(bar, rowSize)
+    this.historicalCache.set(bar.time, { key, fp })
+    return fp
+  }
+
+  private sync(): void {
+    const feed = this.feed()
+    feed?.configure(this.settings.ticksPerRow, this.settings.minTradeSize)
+    const liveBars = feed?.bars() ?? []
+    const liveByTime = new Map<number, FootprintBar>()
+    for (const bar of liveBars) {
+      if (bar.cells.length > 0) liveByTime.set(bar.time, bar)
+    }
+
+    const rowSize = Math.max(1e-9, this.context.tickSize) * Math.max(1, this.settings.ticksPerRow)
+    const merged: FootprintBar[] = []
+    for (const bar of this.sourceBars) {
+      const live = liveByTime.get(bar.time)
+      if (live) {
+        merged.push(live)
+        liveByTime.delete(bar.time)
+      } else {
+        const fp = this.historicalBar(bar, rowSize)
+        if (fp) merged.push(fp)
+      }
+    }
+    for (const live of liveByTime.values()) {
+      merged.push(live)
+    }
+
+    this.footprint.setBars(merged)
+    this.host?.requestUpdate()
+  }
+
+  zOrder() {
+    return this.footprint.zOrder()
+  }
+  attached(host: PrimitiveHost): void {
+    this.host = host
+    this.footprint.attached(host)
+  }
+  detached(): void {
+    this.host = null
+    this.footprint.detached()
+  }
+  draw(ctx: CanvasRenderingContext2D, rc: PrimitiveRenderContext): void {
+    this.footprint.draw(ctx, rc)
+  }
+  autoscaleInfo() {
+    return this.footprint.autoscaleInfo()
+  }
+  hitTest(x: number, y: number) {
+    return this.footprint.hitTest(x, y)
+  }
+  setBars(bars: readonly Bar[]): void {
+    this.sourceBars = bars
+    this.sync()
+  }
+  setSettings(settings: ProfileSettings, context = this.context): void {
+    if (settings.kind !== 'order-flow') return
+    if (
+      settings.ticksPerRow !== this.settings.ticksPerRow ||
+      context.tickSize !== this.context.tickSize
+    ) {
+      this.historicalCache.clear()
+    }
+    this.settings = settings
+    this.context = context
+    this.footprint.setOptions(footprintOptions(settings, context))
+    this.sync()
+  }
+  warning(): string | null {
+    return this.feed()?.lacksQuantity()
+      ? 'No traded quantity is coming through for this symbol, so Order Flow has nothing to draw. Indices do not carry it; try a stock, future or option.'
+      : null
+  }
+  contextMenuAt(): ProfileMenuAction | null {
+    return null
+  }
+}
+
 export function createChartProfile(
   kind: ProfileKind,
   settings: ProfileSettings,
   context: ChartProfileContext
 ): ChartProfile {
   if (kind !== settings.kind) throw new Error('Profile kind and settings must match')
+  if (settings.kind === 'order-flow') return new OrderFlowChartProfile(settings, context)
   return new SessionChartProfile(settings, context)
 }
