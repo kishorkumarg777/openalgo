@@ -40,6 +40,7 @@ from .option_symbol import api as option_symbol_ns
 from .options_multiorder import api as options_multiorder_ns
 from .options_order import api as options_order_ns
 from .orderbook import api as orderbook_ns
+from .orderflow import api as orderflow_ns
 from .orderstatus import api as orderstatus_ns
 from .ping import api as ping_ns
 from .place_gtt_order import api as place_gtt_order_ns
@@ -106,6 +107,7 @@ api.add_namespace(discord_ns, path="/discord")
 api.add_namespace(margin_ns, path="/margin")
 api.add_namespace(instruments_ns, path="/instruments")
 api.add_namespace(chart_ns, path="/chart")
+api.add_namespace(orderflow_ns, path="/orderflow")
 api.add_namespace(market_holidays_ns, path="/market/holidays")
 api.add_namespace(market_timings_ns, path="/market/timings")
 api.add_namespace(pnl_symbols_ns, path="/pnl")

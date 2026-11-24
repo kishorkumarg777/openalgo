@@ -36,6 +36,14 @@ const TICK_TRIM_SLACK = 10_000
 /** Quote updates seen with no usable quantity before the feed says so. */
 export const NO_QUANTITY_AFTER = 60
 
+/** Compact backend-recorded print tuple: [timeSec, price, qty, sideCode (1=ask, 0=bid)]. */
+export type RecordedOrderFlowTick = readonly [
+  timeSec: number,
+  price: number,
+  qty: number,
+  sideCode: number,
+]
+
 export interface OrderFlowTick {
   ltp: number
   /** Last traded quantity from the feed, when it has one. */
@@ -73,8 +81,10 @@ export class OrderFlowFeed {
   private snapshot: readonly FootprintBar[] = []
   private dirty = false
   private lastTime = Number.NEGATIVE_INFINITY
+  private liveStartTime: number | null = null
   private seen = 0
   private recorded = 0
+  private hydrated = 0
 
   constructor(opts: OrderFlowFeedOptions) {
     this.opts = { ...opts }
@@ -105,6 +115,7 @@ export class OrderFlowFeed {
     // The aggregator refuses a tick older than the last one it took. A late
     // update is placed at the newest time rather than dropped or thrown.
     const time = Math.max(tick.timeSec, this.lastTime)
+    if (this.liveStartTime === null) this.liveStartTime = time
     const bid = typeof tick.bid === 'number' && tick.bid > 0 ? tick.bid : undefined
     const ask = typeof tick.ask === 'number' && tick.ask > 0 ? tick.ask : undefined
     const side = this.classify({ price: tick.ltp, qty, bid, ask })
@@ -117,6 +128,60 @@ export class OrderFlowFeed {
       this.ticks.splice(0, TICK_TRIM_SLACK)
     }
     return true
+  }
+
+  /**
+   * Prepend backend-recorded classified ticks collected earlier in the session
+   * (or prior sessions) without disturbing live ticks that already arrived or
+   * the live cumulative-volume baseline.
+   */
+  hydrate(records: readonly RecordedOrderFlowTick[]): number {
+    if (!records.length) return 0
+    const cutoff = this.liveStartTime
+    const incoming: FootprintTick[] = []
+    let prevTs = Number.NEGATIVE_INFINITY
+    for (const row of records) {
+      const [rawTime, price, qty, sideCode] = row
+      if (
+        !Number.isFinite(rawTime) ||
+        !(price > 0) ||
+        !Number.isFinite(price) ||
+        !(qty > 0) ||
+        !Number.isFinite(qty)
+      ) {
+        continue
+      }
+      if (cutoff !== null && rawTime >= cutoff) continue
+      const time = Math.max(rawTime, prevTs)
+      prevTs = time
+      incoming.push({
+        time,
+        price,
+        qty: Math.round(qty),
+        side: sideCode === 1 ? 'ask' : 'bid',
+      })
+    }
+    if (!incoming.length) return 0
+
+    // Keep only already-ingested live ticks (>= cutoff) so repeated hydrations
+    // replace prior hydrated prints idempotently instead of duplicating them.
+    const liveOnly =
+      cutoff !== null ? this.ticks.filter((t) => t.time >= cutoff) : []
+    const combined = [...incoming, ...liveOnly]
+    if (combined.length > MAX_RETAINED_TICKS) {
+      combined.splice(0, combined.length - MAX_RETAINED_TICKS)
+    }
+    this.ticks = combined
+    this.hydrated = incoming.length
+    this.recorded = combined.length
+    this.aggregator = this.makeAggregator()
+    this.list = []
+    for (const print of this.ticks) this.apply(print)
+    this.lastTime = this.ticks.length
+      ? this.ticks[this.ticks.length - 1].time
+      : Number.NEGATIVE_INFINITY
+    this.dirty = true
+    return incoming.length
   }
 
   /**
@@ -178,8 +243,27 @@ export class OrderFlowFeed {
     return this.seen >= NO_QUANTITY_AFTER && this.recorded === 0
   }
 
-  /** Trades recorded so far. */
+  /** Trades recorded so far (hydrated + live). */
   tradeCount(): number {
     return this.recorded
+  }
+
+  /** Trades loaded from the backend tick recorder. */
+  hydratedTradeCount(): number {
+    return this.hydrated
+  }
+
+  /** Number of footprint bars backed by real recorded/live prints. */
+  recordedBarCount(): number {
+    let count = 0
+    for (const bar of this.list) {
+      if (bar.cells.length > 0) count += 1
+    }
+    return count
+  }
+
+  /** Active tick multiplier for this feed's aggregator. */
+  currentRowTicks(): number {
+    return this.opts.rowTicks
   }
 }

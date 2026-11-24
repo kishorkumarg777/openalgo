@@ -164,3 +164,40 @@ describe('OrderFlowFeed missing quantity', () => {
     expect(f.lacksQuantity()).toBe(false)
   })
 })
+
+describe('OrderFlowFeed hydration', () => {
+  it('hydrates recorded backend prints without duplicating live ticks', () => {
+    const f = feed()
+    // Simulate a live tick arriving before the backend hydration response returns.
+    f.ingest({ ltp: 650.2, ltq: 25, bid: 650.15, ask: 650.2, timeSec: 130 })
+
+    // Backend returns older prints plus an overlapping print at t=130.
+    const added = f.hydrate([
+      [61, 649.8, 40, 0],
+      [75, 650.0, 60, 1],
+      [121, 650.1, 30, 1],
+      [130, 650.2, 25, 1],
+    ])
+    expect(added).toBe(3)
+    expect(f.hydratedTradeCount()).toBe(3)
+    expect(f.tradeCount()).toBe(4)
+    expect(f.recordedBarCount()).toBe(2)
+
+    const bars = f.bars()
+    expect(bars.map((b) => b.time)).toEqual([60, 120])
+    expect(total(bars[0])).toBe(100)
+    expect(bars[0].delta).toBe(20)
+    expect(total(bars[1])).toBe(55)
+    expect(bars[1].delta).toBe(55)
+
+    // Re-hydrating idempotently keeps exact counts without duplicating prints.
+    f.hydrate([
+      [61, 649.8, 40, 0],
+      [75, 650.0, 60, 1],
+      [121, 650.1, 30, 1],
+    ])
+    expect(f.tradeCount()).toBe(4)
+    expect(total(f.bars()[0])).toBe(100)
+    expect(total(f.bars()[1])).toBe(55)
+  })
+})

@@ -1,0 +1,204 @@
+"""Unit tests for the local Order Flow SQLite tick recorder and query service."""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+from unittest.mock import patch
+
+import pytest
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from database.orderflow_tick_db import OrderFlowTickRecorder
+from services.orderflow_service import get_orderflow_ticks
+
+
+def _make_recorder(tmp_path, **kwargs):
+    return OrderFlowTickRecorder(
+        db_path=str(tmp_path / "orderflow_test.db"),
+        start_thread=False,
+        **kwargs,
+    )
+
+
+def test_quote_rule_classification_and_volume_deltas(tmp_path):
+    rec = _make_recorder(tmp_path)
+    base_ts = int(time.time()) - 120
+    try:
+        # First snapshot sets baseline volume (no trade emitted).
+        assert (
+            rec.record_market_data(
+                "HBLENGINE",
+                "NSE",
+                2,
+                {"ltp": 650.0, "volume": 10_000, "bid_price": 649.95, "ask_price": 650.05, "ltt": base_ts},
+                now_sec=base_ts,
+            )
+            is False
+        )
+        # Trade at ask -> aggressive buy (side=1).
+        assert (
+            rec.record_market_data(
+                "HBLENGINE",
+                "NSE",
+                2,
+                {"ltp": 650.05, "volume": 10_120, "bid_price": 649.95, "ask_price": 650.05, "ltt": base_ts + 1},
+                now_sec=base_ts + 1,
+            )
+            is True
+        )
+        # Duplicate volume refresh -> ignored (no double counting).
+        assert (
+            rec.record_market_data(
+                "HBLENGINE",
+                "NSE",
+                2,
+                {"ltp": 650.05, "volume": 10_120, "bid_price": 649.95, "ask_price": 650.05, "ltt": base_ts + 2},
+                now_sec=base_ts + 2,
+            )
+            is False
+        )
+        # Trade at bid -> aggressive sell (side=0).
+        assert (
+            rec.record_market_data(
+                "HBLENGINE",
+                "NSE",
+                2,
+                {"ltp": 649.95, "volume": 10_200, "bid_price": 649.95, "ask_price": 650.05, "ltt": base_ts + 3},
+                now_sec=base_ts + 3,
+            )
+            is True
+        )
+        # Trade inside spread (650.00 > prev 649.95) -> falls back to tick rule -> buy (side=1).
+        assert (
+            rec.record_market_data(
+                "HBLENGINE",
+                "NSE",
+                2,
+                {"ltp": 650.00, "volume": 10_250, "bid_price": 649.95, "ask_price": 650.05, "ltt": base_ts + 4},
+                now_sec=base_ts + 4,
+            )
+            is True
+        )
+
+        ticks = rec.query_ticks("hblengine", "nse")
+        assert len(ticks) == 3
+        assert ticks[0] == [float(base_ts + 1), 650.05, 120, 1]
+        assert ticks[1] == [float(base_ts + 3), 649.95, 80, 0]
+        assert ticks[2] == [float(base_ts + 4), 650.00, 50, 1]
+    finally:
+        rec.close()
+
+
+def test_depth_payload_book_extraction_and_ltq_fallback(tmp_path):
+    rec = _make_recorder(tmp_path)
+    base_ts = int(time.time()) - 60
+    try:
+        # Depth payload with no cumulative volume uses ltq + top-of-book depth prices.
+        assert (
+            rec.record_market_data(
+                "CUPID",
+                "NSE",
+                3,
+                {
+                    "ltp": 360.50,
+                    "ltq": 45,
+                    "depth": {"buy": [{"price": 360.50, "quantity": 100}], "sell": [{"price": 360.60, "quantity": 200}]},
+                    "timestamp": (base_ts + 1) * 1000,
+                },
+                now_sec=base_ts + 1,
+            )
+            is True
+        )
+        ticks = rec.query_ticks("CUPID", "NSE")
+        assert len(ticks) == 1
+        assert ticks[0][1:] == [360.50, 45, 0]
+    finally:
+        rec.close()
+
+
+def test_query_window_limit_and_retention_pruning(tmp_path):
+    rec = _make_recorder(tmp_path, retention_days=2)
+    now = int(time.time())
+    try:
+        # Inject one stale tick (5 days old) and 5 recent ticks.
+        old_ms = (now - 5 * 86400) * 1000
+        with rec._db_lock:
+            conn = rec._get_conn()
+            conn.execute(
+                "INSERT INTO orderflow_ticks (exchange, symbol, ts_ms, price, qty, side, bid, ask) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("NSE", "HBLENGINE", old_ms, 600.0, 10, "ask", 599.95, 600.05),
+            )
+            conn.commit()
+
+        for i in range(5):
+            rec.record_market_data(
+                "HBLENGINE",
+                "NSE",
+                2,
+                {"ltp": 650.0 + i * 0.05, "ltq": 10 + i, "ltt": now - 10 + i},
+                now_sec=now - 10 + i,
+            )
+        rec.flush()
+        # Flush auto-pruned the stale 5-day-old row; only the 5 recent ticks remain.
+        all_ticks = rec.query_ticks("HBLENGINE", "NSE")
+        assert len(all_ticks) == 5
+        assert all(t[0] >= now - 10 for t in all_ticks)
+
+        # Explicit forced prune removes a freshly injected stale row.
+        with rec._db_lock:
+            conn = rec._get_conn()
+            conn.execute(
+                "INSERT INTO orderflow_ticks (exchange, symbol, ts_ms, price, qty, side, bid, ask) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("NSE", "HBLENGINE", old_ms, 600.0, 10, "ask", 599.95, 600.05),
+            )
+            conn.commit()
+        assert rec._maybe_prune(force=True, now_sec=now) == 1
+
+        # Limit takes the newest N in chronological order.
+        newest_two = rec.query_ticks("HBLENGINE", "NSE", limit=2)
+        assert len(newest_two) == 2
+        assert newest_two[0][2] == 13
+        assert newest_two[1][2] == 14
+
+        # Time window filter works inclusively.
+        windowed = rec.query_ticks("HBLENGINE", "NSE", start_time=now - 8, end_time=now - 7)
+        assert [t[2] for t in windowed] == [12, 13]
+    finally:
+        rec.close()
+
+
+def test_orderflow_service_auth_and_response_shape(tmp_path):
+    rec = _make_recorder(tmp_path)
+    now = int(time.time()) - 20
+    try:
+        rec.record_market_data("HBLENGINE", "NSE", 2, {"ltp": 650.0, "ltq": 25, "ltt": now}, now_sec=now)
+        rec.flush()
+
+        ok, body, code = get_orderflow_ticks("", "HBLENGINE", "NSE")
+        assert (ok, code) == (False, 401)
+
+        with patch("services.orderflow_service.verify_api_key", return_value=None):
+            ok, body, code = get_orderflow_ticks("bad-key", "HBLENGINE", "NSE")
+            assert (ok, code) == (False, 403)
+
+        with (
+            patch("services.orderflow_service.verify_api_key", return_value="user-1"),
+            patch("services.orderflow_service.get_orderflow_recorder", return_value=rec),
+        ):
+            ok, body, code = get_orderflow_ticks("valid-key", "hblengine", "nse")
+            assert ok is True
+            assert code == 200
+            assert body["status"] == "success"
+            assert body["data"]["symbol"] == "HBLENGINE"
+            assert body["data"]["count"] == 1
+            assert body["data"]["recording"] is True
+            assert body["data"]["ticks"][0][1:] == [650.0, 25, 1]
+    finally:
+        rec.close()

@@ -99,6 +99,7 @@ import {
   type AlertsView,
   type BrandingLink,
   type ChartSettingsRequest,
+  type OrderFlowUiState,
   type DrawSelection,
   type DrawStats,
   type IndicatorSettingsRequest,
@@ -117,6 +118,7 @@ import { useThemeStore } from '@/stores/themeStore'
 import { showToast } from '@/utils/toast'
 import { ChartStateOverlay } from './ChartStateOverlay'
 import { ChartToolbar } from './ChartToolbar'
+import { OrderFlowBar } from './OrderFlowBar'
 import { ComparisonMenu } from './ComparisonMenu'
 import { DrawingStyleBar } from './DrawingStyleBar'
 import { DrawingTextDialog, type TextRequest } from './DrawingTextDialog'
@@ -375,6 +377,7 @@ export function ChartPane({
   const [intervalGroups, setIntervalGroups] = useState<IntervalGroup[]>([])
   const [interval, setIntervalState] = useState('5m')
   const [chartType, setChartTypeState] = useState('candlestick')
+  const [orderFlowState, setOrderFlowState] = useState<OrderFlowUiState | null>(null)
   // The type on screen now, for a reply that lands after the type has moved on.
   const chartTypeRef = useRef(chartType)
   chartTypeRef.current = chartType
@@ -535,6 +538,10 @@ export function ChartPane({
       onChartTypeChange: (ct) => {
         if (!current) return
         setChartTypeState(ct)
+      },
+      onOrderFlowChange: (state) => {
+        if (!current) return
+        setOrderFlowState(state)
       },
       onIntervalChange: (iv) => {
         if (!current) return
@@ -1525,6 +1532,19 @@ export function ChartPane({
           </div>
         </div>
       </ChartToolbar>
+
+      {chartType === 'order-flow' && orderFlowState && (
+        <OrderFlowBar
+          state={orderFlowState}
+          onPatch={(patch) => void terminalRef.current?.applyChartSettings(patch)}
+          onSync={() => void terminalRef.current?.refreshOrderFlowTape()}
+          onOpenSettings={() =>
+            void terminalRef.current
+              ?.chartSettings()
+              .then((cs) => cs && setChartSettings({ ...cs, initialTab: 'price' }))
+          }
+        />
+      )}
 
       {/* Chart area */}
       {/* A size container, so the drawing properties bar fits the pane it is in. */}

@@ -204,4 +204,56 @@ describe('order flow profile', () => {
     }))
     expect(autoOrderFlowRowTicks(nifty1m, 0.1)).toBe(20)
   })
+
+  it('wires GoCharting pro signals and preserves candle OHLC on mid-bar live feeds', () => {
+    const feed = newFeed()
+    feed.ingest({ ltp: 102, ltq: 15, timeSec: 65 })
+    const onRowTicks = vi.fn()
+    const profile = createChartProfile(
+      'order-flow',
+      {
+        ...settings(),
+        rowSizeMode: 'manual',
+        ticksPerRow: 1,
+        absorptionMultiple: 2,
+        bigOrderMultiple: 3,
+        multipleNodeBars: 1, // clamped safely to >= 2
+        flipBars: 2,
+        intensityScope: 'visible',
+        compactNumbers: false,
+        markDivergence: true,
+      },
+      { ...context, orderFlow: () => feed, onOrderFlowRowTicks: onRowTicks }
+    )
+    profile.attached?.({ requestUpdate: vi.fn() })
+    profile.setBars([{ time: 60, open: 99, high: 105, low: 98, close: 102, volume: 1200 }])
+    const fp = (
+      profile as unknown as {
+        footprint: {
+          options: () => {
+            absorptionMultiple: number
+            bigOrderMultiple: number
+            multipleNodeBars: number
+            flipBars: number
+            intensityScope: string
+            compactNumbers: boolean
+            showDeltaLabels: boolean
+          }
+          _bars: { open?: number; high?: number; low?: number; close?: number }[]
+        }
+      }
+    ).footprint
+    expect(onRowTicks).toHaveBeenCalledWith(1)
+    expect(fp.options()).toMatchObject({
+      absorptionMultiple: 2,
+      bigOrderMultiple: 3,
+      multipleNodeBars: 2,
+      flipBars: 2,
+      intensityScope: 'visible',
+      compactNumbers: false,
+      showDeltaLabels: true,
+    })
+    // Full candle OHLC envelope preserved even though live feed only captured 102.
+    expect(fp._bars[0]).toMatchObject({ open: 99, high: 105, low: 98, close: 102 })
+  })
 })

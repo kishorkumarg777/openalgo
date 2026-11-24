@@ -269,7 +269,18 @@ const orderFlow = {
   showVisibleProfile: boolean('Visible volume profile', false, 'Order flow display'),
   showEmptyRows: boolean('Rows with no trades', true, 'Order flow display'),
   showUnfinishedAuctions: boolean('Unfinished auctions', false, 'Order flow display'),
+  showDeltaLabels: boolean('Delta label under bar', false, 'Order flow display'),
   markDivergence: boolean('Mark delta divergence', false, 'Order flow display'),
+  intensityScope: choice<'bar' | 'visible'>(
+    'Heat scaling',
+    'bar',
+    [
+      ['bar', 'Per bar'],
+      ['visible', 'Visible range'],
+    ],
+    'Order flow display'
+  ),
+  compactNumbers: boolean('Compact numbers (12.3K)', true, 'Order flow display'),
   textColorMode: choice<'contrast' | 'side' | 'delta' | 'dominant' | 'imbalance' | 'volume'>(
     'Text color',
     'contrast',
@@ -306,6 +317,10 @@ const orderFlow = {
   ),
   stackedImbalances: numeric('Stacked imbalance rows (0 off)', 3, 0, 20, 'Order flow imbalance'),
   showZones: boolean('Stacked imbalance zones', false, 'Order flow imbalance'),
+  bigOrderMultiple: numeric('Big limit order (x avg, 0 off)', 0, 0, 50, 'Order flow signals'),
+  absorptionMultiple: numeric('Absorption (x avg, 0 off)', 0, 0, 50, 'Order flow signals'),
+  multipleNodeBars: numeric('Stacked POC nodes (bars, 0 off)', 0, 0, 20, 'Order flow signals'),
+  flipBars: numeric('Aggressive delta flip (bars, 0 off)', 0, 0, 20, 'Order flow signals'),
 } satisfies Record<string, Setting>
 
 export type TpoProfileSettings = SettingsOf<typeof tpo> & { kind: 'tpo' }

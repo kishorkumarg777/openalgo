@@ -51,6 +51,8 @@ export interface ChartProfileContext {
    * loads on demand and outlives the profile, so a chart rebuild keeps the bars.
    */
   orderFlow?: () => OrderFlowFeed | null
+  /** Order Flow only: notifies the terminal of the active resolved row tick count. */
+  onOrderFlowRowTicks?: (rowTicks: number) => void
 }
 
 export interface ChartProfile extends IPrimitive {
@@ -1230,6 +1232,8 @@ function footprintOptions(
     ...themeColors,
     displayMode: settings.displayMode,
     cellStyle: settings.cellStyle,
+    intensityScope: settings.intensityScope,
+    compactNumbers: settings.compactNumbers,
     textColorMode: settings.textColorMode,
     font: 10,
     minTextHeight: 8,
@@ -1243,7 +1247,7 @@ function footprintOptions(
     showValueArea: settings.showValueArea,
     // The footprint takes a fraction of volume; the setting is a percentage.
     valueAreaPercent: settings.valueAreaPercent / 100,
-    showDeltaLabels: false,
+    showDeltaLabels: settings.showDeltaLabels || settings.markDivergence,
     markDivergence: settings.markDivergence,
     statsPosition: 'bar',
     statsRows: settings.showBarCards ? ['volume', 'delta', 'deltaPct'] : [],
@@ -1255,6 +1259,10 @@ function footprintOptions(
     imbalanceRatio: settings.imbalanceRatio,
     imbalanceThreshold: settings.imbalanceThreshold,
     stackedImbalances: settings.stackedImbalances,
+    multipleNodeBars: settings.multipleNodeBars > 0 ? Math.max(2, settings.multipleNodeBars) : 0,
+    bigOrderMultiple: settings.bigOrderMultiple,
+    absorptionMultiple: settings.absorptionMultiple,
+    flipBars: settings.flipBars,
     showZones: settings.showZones,
   }
 }
@@ -1422,6 +1430,7 @@ class OrderFlowChartProfile implements ChartProfile {
         ? this.context.tickSize
         : 0.05
     const rowTicks = this.effectiveRowTicks(tickSize)
+    this.context.onOrderFlowRowTicks?.(rowTicks)
     const feed = this.feed()
     feed?.configure(rowTicks, this.settings.minTradeSize)
     const liveBars = feed?.bars() ?? []
@@ -1435,7 +1444,15 @@ class OrderFlowChartProfile implements ChartProfile {
     for (const bar of this.sourceBars) {
       const live = liveByTime.get(bar.time)
       if (live) {
-        merged.push(live)
+        // Preserve the candle's full OHLC wick envelope when a live feed starts
+        // mid-bar, while keeping the live bar's real recorded cells intact.
+        merged.push({
+          ...live,
+          open: bar.open,
+          high: Math.max(bar.high, live.high ?? bar.high),
+          low: Math.min(bar.low, live.low ?? bar.low),
+          close: live.close ?? bar.close,
+        })
         liveByTime.delete(bar.time)
       } else {
         const fp = this.historicalBar(bar, rowSize)

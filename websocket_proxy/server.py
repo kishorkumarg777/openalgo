@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 
 from database.auth_db import get_broker_name, verify_api_key
+from database.orderflow_tick_db import get_orderflow_recorder
 from services.market_data_service import get_market_data_service
 from utils.logging import get_logger, highlight_url
 
@@ -250,6 +251,10 @@ class WebSocketProxy:
         """Stop the WebSocket server and clean up all resources"""
         logger.info("Stopping WebSocket server...")
         self.running = False
+        try:
+            get_orderflow_recorder().flush()
+        except Exception as e:
+            logger.debug(f"OrderFlow recorder flush on stop failed: {e}")
 
         try:
             # Close the WebSocket server first (this releases the port)
@@ -2115,6 +2120,14 @@ class WebSocketProxy:
                 except Exception as mds_error:
                     # Don't block WebSocket delivery if MarketDataService has issues
                     logger.debug(f"MarketDataService processing error: {mds_error}")
+
+                # Record classified Order Flow ticks (non-blocking in-memory buffer -> WAL SQLite)
+                try:
+                    get_orderflow_recorder().record_market_data(
+                        symbol, exchange, mode, market_data, now_sec=current_time
+                    )
+                except Exception as of_error:
+                    logger.debug(f"OrderFlow recorder error: {of_error}")
 
                 # OPTIMIZATION 2: O(1) lookup using subscription index
                 # Higher modes include all lower-mode data (Depth > Quote > LTP),

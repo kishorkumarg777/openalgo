@@ -290,11 +290,12 @@ import {
 } from './legend'
 import { fileForScriptId, isScriptInstance } from './openscriptFiles'
 import { loadOpenScriptStudies, SCRIPT_ALERT_EVENT } from './openscriptStudies'
-import type { OrderFlowFeed } from './orderFlowFeed'
+import type { OrderFlowFeed, RecordedOrderFlowTick } from './orderFlowFeed'
 import { profileIntervalSupported, selectProfileInterval } from './profileIntervals'
 import { ProfileLayer, type ProfileMenuAction } from './profileLayer'
 import {
   isProfileKind,
+  type OrderFlowSettings,
   type ProfileKind,
   profileDefaults,
   profileValues,
@@ -418,6 +419,19 @@ export interface ConfirmedOrder {
   trigger_price?: number
 }
 
+export interface OrderFlowUiState {
+  settings: OrderFlowSettings
+  tickSize: number
+  effectiveRowTicks: number
+  effectiveRowSize: number
+  recordedBars: number
+  totalBars: number
+  tradeCount: number
+  hydratedTrades: number
+  recording: boolean
+  syncing: boolean
+}
+
 export interface TerminalCallbacks {
   onComparisonsChange?(state: TerminalComparisonState): void
   /** Chart configuration changed; live price updates do not fire this callback. */
@@ -426,6 +440,8 @@ export interface TerminalCallbacks {
   onIntervalChange?(interval: string): void
   /** The chart type changed from inside the terminal, such as an undo or redo. */
   onChartTypeChange?(chartType: string): void
+  /** Order Flow settings, resolved row precision, or recorded tape status changed. */
+  onOrderFlowChange?(state: OrderFlowUiState | null): void
   onContextMenu?(menu: TerminalContextMenu): void
   onToast(msg: string, kind: ToastKind): void
   onWsState(state: string): void
@@ -1229,6 +1245,12 @@ export class TradingTerminal {
    */
   private orderFlowFeed: OrderFlowFeed | null = null
   private orderFlowGeneration = 0
+  private orderFlowRowTicks = 10
+  private orderFlowRecording = true
+  private orderFlowSyncing = false
+  private orderFlowEmitTimer: ReturnType<typeof setTimeout> | null = null
+  /** Top-of-book quote captured from live Quote frames for true bid/ask classification. */
+  private liveQuoteBook: { symbol: string; bid: number; ask: number } | null = null
 
   private rawBars: Bar[] = []
   /**
@@ -2421,6 +2443,12 @@ export class TradingTerminal {
       intervalSeconds: intervalSeconds(this.interval) ?? 300,
       priceScale: () => price.priceScale(),
       orderFlow: () => this.orderFlowFeed,
+      onOrderFlowRowTicks: (rowTicks: number) => {
+        if (this.orderFlowRowTicks !== rowTicks) {
+          this.orderFlowRowTicks = rowTicks
+          this.emitOrderFlowState(true)
+        }
+      },
     }
     if (kind === 'order-flow' && this.sym?.quoteOnly) {
       this.toast(
@@ -4991,6 +5019,7 @@ export class TradingTerminal {
         this.installProfile()
       }
     }
+    this.emitOrderFlowState(true)
   }
 
   /**
@@ -6556,17 +6585,22 @@ export class TradingTerminal {
     this.cb.onLtp(e.ltp)
     const tickTime = e.timeSec || nowSec()
     // Order Flow reads quantity off the same tick. Only a recorded trade moves it.
+    const book =
+      this.liveQuoteBook && this.liveQuoteBook.symbol === this.sym.symbol
+        ? this.liveQuoteBook
+        : null
     if (
       this.orderFlowFeed?.ingest({
         ltp: e.ltp,
         ltq: e.ltq,
         volume: e.volume,
-        bid: e.bid,
-        ask: e.ask,
+        bid: e.bid ?? book?.bid,
+        ask: e.ask ?? book?.ask,
         timeSec: tickTime,
       })
     ) {
       this.profileLayer?.refresh()
+      this.emitOrderFlowState(false)
     }
     // Recolour with the price: the line belongs to the forming candle, so it
     // follows that candle's direction rather than sitting amber forever.
@@ -6657,6 +6691,7 @@ export class TradingTerminal {
       this.builder.seed(this.rawBars[this.rawBars.length - 1])
     }
     this.depthActive = false
+    this.liveQuoteBook = null
     // A new subscription starts with no book: the last one's bid and ask belong to another symbol.
     this.priceAxis.setQuote(null, null)
     if (this.offLtp) {
@@ -6725,6 +6760,136 @@ export class TradingTerminal {
     this.liveSub = { mode, symbol: this.sym.symbol, exchange: this.sym.exchange }
   }
 
+  /** Snapshot of Order Flow controls, resolved row precision, and tape fidelity. */
+  orderFlowState(): OrderFlowUiState | null {
+    if (this.ctype !== 'order-flow') return null
+    const settings = readProfileSettings('order-flow', this.chartSettingsSaved)
+    const tick = this.tick()
+    const effectiveRowTicks =
+      settings.rowSizeMode === 'manual'
+        ? settings.ticksPerRow
+        : Math.max(1, this.orderFlowFeed?.currentRowTicks() ?? this.orderFlowRowTicks)
+    return {
+      settings,
+      tickSize: tick,
+      effectiveRowTicks,
+      effectiveRowSize: Number((tick * effectiveRowTicks).toFixed(6)),
+      recordedBars: this.orderFlowFeed?.recordedBarCount() ?? 0,
+      totalBars: this.rawBars.length,
+      tradeCount: this.orderFlowFeed?.tradeCount() ?? 0,
+      hydratedTrades: this.orderFlowFeed?.hydratedTradeCount() ?? 0,
+      recording: this.orderFlowRecording,
+      syncing: this.orderFlowSyncing,
+    }
+  }
+
+  private emitOrderFlowState(immediate: boolean): void {
+    if (this.destroyed || !this.cb.onOrderFlowChange) return
+    if (immediate) {
+      if (this.orderFlowEmitTimer !== null) {
+        clearTimeout(this.orderFlowEmitTimer)
+        this.orderFlowEmitTimer = null
+      }
+      this.cb.onOrderFlowChange(this.orderFlowState())
+      return
+    }
+    if (this.orderFlowEmitTimer !== null) return
+    this.orderFlowEmitTimer = setTimeout(() => {
+      this.orderFlowEmitTimer = null
+      if (!this.destroyed) this.cb.onOrderFlowChange?.(this.orderFlowState())
+    }, 400)
+  }
+
+  /** Re-query backend recorded ticks for the active symbol and merge into the chart. */
+  async refreshOrderFlowTape(): Promise<void> {
+    if (this.ctype !== 'order-flow' || !this.sym || this.sym.synthetic || !this.orderFlowFeed) {
+      return
+    }
+    const sec = intervalSeconds(this.interval) ?? 300
+    const startTime = this.rawBars[0]?.time
+    const endTime = nowSec() + sec
+    await this.hydrateOrderFlowFeed(this.orderFlowGeneration, startTime, endTime)
+  }
+
+  private captureLiveQuoteBook(raw: string): void {
+    if (!this.sym || (!raw.includes('bid_price') && !raw.includes('"bid"'))) return
+    try {
+      const msg = JSON.parse(raw) as {
+        symbol?: string
+        data?: {
+          symbol?: string
+          bid_price?: number
+          ask_price?: number
+          bid?: number
+          ask?: number
+        }
+      }
+      const d =
+        msg.data ??
+        (msg as unknown as {
+          symbol?: string
+          bid_price?: number
+          ask_price?: number
+          bid?: number
+          ask?: number
+        })
+      const sym = d.symbol || msg.symbol
+      if (sym && sym !== this.sym.symbol) return
+      const bid = Number(d.bid_price ?? d.bid)
+      const ask = Number(d.ask_price ?? d.ask)
+      if (bid > 0 && ask > 0 && Number.isFinite(bid) && Number.isFinite(ask)) {
+        this.liveQuoteBook = { symbol: this.sym.symbol, bid, ask }
+        if (!this.sym.quoteOnly) this.priceAxis.setQuote(bid, ask)
+        if (this.tradeBtns) {
+          this.depthActive = true
+          this.tradeBtns.setPrices(bid, ask)
+        }
+      }
+    } catch {
+      /* ignore non-JSON or unrelated frames */
+    }
+  }
+
+  private async hydrateOrderFlowFeed(
+    generation: number,
+    startTime: number | undefined,
+    endTime: number
+  ): Promise<void> {
+    const sym = this.sym
+    if (!sym || sym.synthetic || sym.quoteOnly || !this.apiKey) return
+    this.orderFlowSyncing = true
+    this.emitOrderFlowState(true)
+    try {
+      const res = await this.api<{
+        data?: { ticks?: RecordedOrderFlowTick[]; recording?: boolean }
+      }>('orderflow', {
+        symbol: sym.symbol,
+        exchange: sym.exchange,
+        ...(typeof startTime === 'number' && Number.isFinite(startTime)
+          ? { start_time: startTime }
+          : {}),
+        end_time: endTime,
+      })
+      if (generation !== this.orderFlowGeneration || this.destroyed || !this.orderFlowFeed) return
+      if (typeof res.data?.recording === 'boolean') this.orderFlowRecording = res.data.recording
+      const ticks = res.data?.ticks
+      if (Array.isArray(ticks) && ticks.length > 0) {
+        const added = this.orderFlowFeed.hydrate(ticks)
+        if (added > 0) {
+          this.setPriceData()
+          this.profileLayer?.refresh(true)
+        }
+      }
+    } catch {
+      /* Older server or offline DB: stay cleanly on live ticks + OHLCV estimates. */
+    } finally {
+      if (generation === this.orderFlowGeneration && !this.destroyed) {
+        this.orderFlowSyncing = false
+        this.emitOrderFlowState(true)
+      }
+    }
+  }
+
   /**
    * Start a fresh Order Flow feed for the symbol and interval now on the chart,
    * or drop it on any other chart type. The feed loads on demand because it
@@ -6733,10 +6898,18 @@ export class TradingTerminal {
   private startOrderFlowFeed(intervalSec: number | null): void {
     const generation = ++this.orderFlowGeneration
     this.orderFlowFeed = null
-    if (this.ctype !== 'order-flow' || !intervalSec) return
+    this.orderFlowSyncing = false
+    if (this.ctype !== 'order-flow' || !intervalSec) {
+      this.emitOrderFlowState(true)
+      return
+    }
     const anchorSec = this.rawBars[this.rawBars.length - 1]?.time ?? 0
+    const startTime = this.rawBars[0]?.time
+    const endTime = nowSec() + intervalSec
     const tickSize = this.tick()
     const saved = readProfileSettings('order-flow', this.chartSettingsSaved)
+    this.orderFlowRowTicks = saved.ticksPerRow
+    this.emitOrderFlowState(true)
     void import('./orderFlowFeed')
       .then(({ OrderFlowFeed }) => {
         if (generation !== this.orderFlowGeneration || this.destroyed) return
@@ -6748,6 +6921,8 @@ export class TradingTerminal {
           minTradeSize: saved.minTradeSize,
         })
         this.profileLayer?.refresh(true)
+        this.emitOrderFlowState(true)
+        void this.hydrateOrderFlowFeed(generation, startTime, endTime)
       })
       .catch((error) => this.toast(`Order Flow could not start: ${this.cleanError(error)}`, 'err'))
   }
@@ -6799,6 +6974,7 @@ export class TradingTerminal {
       if (last) this.legLtp.set(leg, last.close)
     }
     this.depthActive = false
+    this.liveQuoteBook = null
     // A new subscription starts with no book: the last one's bid and ask belong to another symbol.
     this.priceAxis.setQuote(null, null)
     if (this.offLtp) {
@@ -7335,6 +7511,7 @@ export class TradingTerminal {
     this.ctype = v
     this.lsSet('ctype', v)
     this.cb.onChartTypeChange?.(v)
+    this.emitOrderFlowState(true)
     if (interval !== this.interval) {
       this.setInterval(interval)
       this.toast(`Using ${interval} bars for ${CHART_TYPES[v].label}`, '')
@@ -8091,9 +8268,58 @@ export class TradingTerminal {
       else this.ctype = 'candlestick'
     }
     this.cb.onReady({ intervalGroups: groups, interval: this.interval, chartType: this.ctype })
+    this.emitOrderFlowState(true)
 
     // one WebSocket for ticks + the account-level order stream.
-    this.ws = new OpenAlgoWsFeed({ url: this.wsUrl, apiKey: this.apiKey })
+    // Wrap browser WebSockets to peek at top-of-book bid/ask in Quote frames
+    // so Order Flow can run true quote-rule classification and keep BUY/SELL live.
+    const captureQuote = (text: string) => this.captureLiveQuoteBook(text)
+    const socketFactory =
+      typeof WebSocket === 'function'
+        ? (url: string) => {
+            const raw = new WebSocket(url)
+            let onMessageCb: ((ev: { data: string }) => void) | null = null
+            return {
+              send: (data: string) => raw.send(data),
+              close: () => raw.close(),
+              get readyState() {
+                return raw.readyState
+              },
+              get onopen() {
+                return raw.onopen as (() => void) | null
+              },
+              set onopen(fn: (() => void) | null) {
+                raw.onopen = fn ? () => fn() : null
+              },
+              get onclose() {
+                return raw.onclose as (() => void) | null
+              },
+              set onclose(fn: (() => void) | null) {
+                raw.onclose = fn ? () => fn() : null
+              },
+              get onerror() {
+                return raw.onerror as (() => void) | null
+              },
+              set onerror(fn: (() => void) | null) {
+                raw.onerror = fn ? () => fn() : null
+              },
+              get onmessage() {
+                return onMessageCb
+              },
+              set onmessage(fn: ((ev: { data: string }) => void) | null) {
+                onMessageCb = fn
+                raw.onmessage = fn
+                  ? (ev: MessageEvent) => {
+                      const text = typeof ev.data === 'string' ? ev.data : ''
+                      if (text) captureQuote(text)
+                      fn({ data: text })
+                    }
+                  : null
+              },
+            }
+          }
+        : undefined
+    this.ws = new OpenAlgoWsFeed({ url: this.wsUrl, apiKey: this.apiKey, socketFactory })
     this.offWsState = this.ws.onState((s) => {
       if (this.destroyed) return
       this.cb.onWsState(s)
@@ -8211,6 +8437,11 @@ export class TradingTerminal {
     this.destroyed = true
     this.orderFlowGeneration += 1
     this.orderFlowFeed = null
+    this.liveQuoteBook = null
+    if (this.orderFlowEmitTimer !== null) {
+      clearTimeout(this.orderFlowEmitTimer)
+      this.orderFlowEmitTimer = null
+    }
     let comparisonError: unknown
     let comparisonFailed = false
     try {
