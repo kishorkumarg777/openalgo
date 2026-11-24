@@ -446,7 +446,15 @@ def process_indmoney_csv(path):
         df["expiry"] = df["EXPIRY_DATE"].str.upper()
         df["strike"] = pd.to_numeric(df["STRIKE_PRICE"], errors="coerce").fillna(0.0)
         df["lotsize"] = pd.to_numeric(df["LOT_UNITS"], errors="coerce").fillna(1).astype(int)
-        df["tick_size"] = pd.to_numeric(df["TICK_SIZE"], errors="coerce").fillna(0.05)
+        _tick = pd.to_numeric(df["TICK_SIZE"], errors="coerce")
+        if segment == "index":
+            df["tick_size"] = _tick.fillna(0.0)
+        else:
+            # INDMoney ships TICK_SIZE in paise for tradeable instruments
+            # (e.g. 5 = ₹0.05, 10 = ₹0.10, 100 = ₹1.00); convert to rupees while
+            # leaving any sub-rupee values untouched and defaulting missing/0 to 0.05.
+            _tick_rupees = _tick.where((_tick > 0) & (_tick < 1.0), (_tick / 100.0).round(6))
+            df["tick_size"] = _tick_rupees.where(_tick_rupees > 0, 0.05).fillna(0.05)
         # Set brsymbol - use SEGMENT for index records, TRADING_SYMBOL for others
         if segment == "index":
             df["brsymbol"] = df["SEGMENT"].fillna("")

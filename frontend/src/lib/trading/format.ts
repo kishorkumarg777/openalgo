@@ -11,9 +11,15 @@
 export function tickSize(tick: number | undefined, refPrice: number): number {
   const t = Number(tick)
   if (!(t > 0)) return 0.05
+  // A whole-number tick above 0.2% of the price (e.g. 5 paise shipped as 5 on
+  // a ₹650 stock, or 10 on a ₹1400 stock) is a paise/rupee unit mismatch;
+  // normalize to rupees when plausible, otherwise fall back to 0.05.
+  if (refPrice > 0 && t >= 1 && Number.isInteger(t) && t > refPrice * 0.002) {
+    const inRupees = t / 100
+    return inRupees <= refPrice * 0.01 ? inRupees : 0.05
+  }
   // A tick greater than ~1% of the price is impossible for a real instrument
-  // (e.g. a ₹1 tick on a ₹23 stock, or a paise/rupee unit mismatch) and would
-  // snap every order to a whole number — fall back to a valid 0.05.
+  // and would snap every order to a whole number — fall back to a valid 0.05.
   if (refPrice > 0 && t > refPrice * 0.01) return 0.05
   return t
 }

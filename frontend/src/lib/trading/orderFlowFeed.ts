@@ -11,9 +11,10 @@
  *   updates, or from the last traded quantity when the feed has no volume. A
  *   broker that coalesces several trades into one update shows them as one
  *   print at the latest price.
- * - Side comes from the tick rule (a print above the last one is a buy, below
- *   is a sell, equal keeps the previous side). The quote feed carries no bid or
- *   ask at the time of the trade, so the quote-based rule is not available.
+ * - Side comes from the quote rule (at/above ask = buy, at/below bid = sell)
+ *   whenever top-of-book bid/ask are present on the update, falling back to the
+ *   tick rule (above last print = buy, below = sell, equal keeps prior side)
+ *   when the quote feed carries no bid or ask.
  * - Nothing is stored. Bars exist for this session of the chart only, and start
  *   when the chart type is selected.
  *
@@ -41,6 +42,10 @@ export interface OrderFlowTick {
   ltq?: number
   /** Cumulative day volume from the feed, when it has one. */
   volume?: number
+  /** Top-of-book bid at trade time, when available. */
+  bid?: number
+  /** Top-of-book ask at trade time, when available. */
+  ask?: number
   /** Seconds since the Unix epoch. */
   timeSec: number
 }
@@ -61,7 +66,7 @@ export interface OrderFlowFeedOptions {
 export class OrderFlowFeed {
   private opts: OrderFlowFeedOptions
   private aggregator: FootprintAggregator
-  private classify = createTradeClassifier('tickRule')
+  private classify = createTradeClassifier('quote')
   private prevVolume: number | null = null
   private ticks: FootprintTick[] = []
   private list: FootprintBar[] = []
@@ -100,7 +105,9 @@ export class OrderFlowFeed {
     // The aggregator refuses a tick older than the last one it took. A late
     // update is placed at the newest time rather than dropped or thrown.
     const time = Math.max(tick.timeSec, this.lastTime)
-    const side = this.classify({ price: tick.ltp, qty })
+    const bid = typeof tick.bid === 'number' && tick.bid > 0 ? tick.bid : undefined
+    const ask = typeof tick.ask === 'number' && tick.ask > 0 ? tick.ask : undefined
+    const side = this.classify({ price: tick.ltp, qty, bid, ask })
     const print: FootprintTick = { time, price: tick.ltp, qty, side }
     this.lastTime = time
     this.ticks.push(print)

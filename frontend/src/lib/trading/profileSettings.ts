@@ -268,6 +268,8 @@ const orderFlow = {
   showSummaryTable: boolean('Bottom summary table (Vol / Delta / CVD)', false, 'Order flow display'),
   showVisibleProfile: boolean('Visible volume profile', false, 'Order flow display'),
   showEmptyRows: boolean('Rows with no trades', true, 'Order flow display'),
+  showUnfinishedAuctions: boolean('Unfinished auctions', false, 'Order flow display'),
+  markDivergence: boolean('Mark delta divergence', false, 'Order flow display'),
   textColorMode: choice<'contrast' | 'side' | 'delta' | 'dominant' | 'imbalance' | 'volume'>(
     'Text color',
     'contrast',
@@ -282,6 +284,15 @@ const orderFlow = {
     'Order flow display'
   ),
   volumeDivisor: numeric('Show quantities in units of', 1, 1, 100000, 'Order flow display'),
+  rowSizeMode: choice<'auto' | 'manual'>(
+    'Row size',
+    'auto',
+    [
+      ['auto', 'Auto'],
+      ['manual', 'Manual'],
+    ],
+    'Order flow calculation'
+  ),
   ticksPerRow: numeric('Ticks per row', 10, 1, 10000, 'Order flow calculation'),
   minTradeSize: numeric('Smallest print counted', 0, 0, 1_000_000, 'Order flow calculation'),
   valueAreaPercent: numeric('Value area (%)', 70, 1, 100, 'Order flow calculation'),

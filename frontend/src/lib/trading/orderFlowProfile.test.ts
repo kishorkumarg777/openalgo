@@ -1,6 +1,6 @@
 import { FOOTPRINT_THEMES } from 'openalgo-charts/profile'
 import { describe, expect, it, vi } from 'vitest'
-import { createChartProfile } from './chartProfiles'
+import { autoOrderFlowRowTicks, createChartProfile } from './chartProfiles'
 import { OrderFlowFeed } from './orderFlowFeed'
 import {
   isProfileKind,
@@ -16,12 +16,13 @@ const newFeed = () =>
 const settings = () => readProfileSettings('order-flow', {})
 
 describe('order flow settings', () => {
-  it('opens as a bid by ask profile with bar cards', () => {
+  it('opens as a bid by ask profile with bar cards and auto row sizing', () => {
     expect(settings()).toMatchObject({
       kind: 'order-flow',
       displayMode: 'bidask',
       cellStyle: 'profile',
       theme: 'default',
+      rowSizeMode: 'auto',
       ticksPerRow: 10,
       minTradeSize: 0,
       stackedImbalances: 3,
@@ -142,5 +143,65 @@ describe('order flow profile', () => {
     expect(fp._bars[0].delta).toBeGreaterThan(0)
     // Bar at time 60 comes from the live feed (25 total qty), not the 500 historical volume.
     expect(fp._bars[1].cells).toEqual(feed.bars()[0].cells)
+  })
+
+  it('conserves exact candle volume across reconstructed historical rows', () => {
+    const profile = createChartProfile(
+      'order-flow',
+      { ...settings(), rowSizeMode: 'manual', ticksPerRow: 5 },
+      { ...context, tickSize: 0.05 }
+    )
+    profile.attached?.({ requestUpdate: vi.fn() })
+    profile.setBars([
+      { time: 0, open: 648.2, high: 652.4, low: 647.5, close: 651.8, volume: 12_347 },
+      { time: 60, open: 651.8, high: 653.0, low: 649.1, close: 649.5, volume: 8_913 },
+    ])
+    const fp = (
+      profile as unknown as {
+        footprint: { _bars: { delta: number; cells: { bidVol: number; askVol: number }[] }[] }
+      }
+    ).footprint
+    const total0 = fp._bars[0].cells.reduce((s, c) => s + c.bidVol + c.askVol, 0)
+    const total1 = fp._bars[1].cells.reduce((s, c) => s + c.bidVol + c.askVol, 0)
+    expect(total0).toBe(12_347)
+    expect(total1).toBe(8_913)
+    expect(fp._bars[0].delta).toBeGreaterThan(0)
+    expect(fp._bars[1].delta).toBeLessThan(0)
+  })
+
+  it('picks clean exchange-aligned auto row steps across timeframes and instruments', () => {
+    // HBLENGINE 1m (~₹4 window span, 0.05 tick) -> ₹0.20 (4 ticks) or ₹0.25 (5 ticks)
+    const hbl1m = Array.from({ length: 8 }, (_, i) => ({
+      time: i * 60,
+      open: 650 + i * 0.3,
+      high: 651.2 + i * 0.3,
+      low: 649.8 + i * 0.3,
+      close: 650.5 + i * 0.3,
+      volume: 5000,
+    }))
+    const ticks1m = autoOrderFlowRowTicks(hbl1m, 0.05)
+    expect([4, 5]).toContain(ticks1m)
+
+    // HBLENGINE 1h (~₹40 window span, 0.05 tick) -> ₹2.00 (40 ticks)
+    const hbl1h = Array.from({ length: 8 }, (_, i) => ({
+      time: i * 3600,
+      open: 640 + i * 4,
+      high: 648 + i * 4,
+      low: 636 + i * 4,
+      close: 644 + i * 4,
+      volume: 120_000,
+    }))
+    expect(autoOrderFlowRowTicks(hbl1h, 0.05)).toBe(40)
+
+    // NIFTY 1m (~₹40 window span, 0.10 tick) -> ₹2.00 (20 ticks)
+    const nifty1m = Array.from({ length: 8 }, (_, i) => ({
+      time: i * 60,
+      open: 23800 + i * 4,
+      high: 23810 + i * 4,
+      low: 23796 + i * 4,
+      close: 23806 + i * 4,
+      volume: 30_000,
+    }))
+    expect(autoOrderFlowRowTicks(nifty1m, 0.1)).toBe(20)
   })
 })

@@ -6513,6 +6513,8 @@ export class TradingTerminal {
             symbol: this.sym.symbol,
             ltp: q.ltp,
             volume: q.volume,
+            bid: q.bid,
+            ask: q.ask,
             timeSec: nowSec(),
           })
         if (!this.sym.quoteOnly) this.priceAxis.setQuote(q.bid, q.ask)
@@ -6545,6 +6547,8 @@ export class TradingTerminal {
     ltp: number
     ltq?: number
     volume?: number
+    bid?: number
+    ask?: number
     timeSec?: number
   }) {
     if (!this.sym || (e.symbol && e.symbol !== this.sym.symbol)) return
@@ -6557,6 +6561,8 @@ export class TradingTerminal {
         ltp: e.ltp,
         ltq: e.ltq,
         volume: e.volume,
+        bid: e.bid,
+        ask: e.ask,
         timeSec: tickTime,
       })
     ) {

@@ -1129,33 +1129,129 @@ class SessionChartProfile implements ChartProfile {
   }
 }
 
+const ORDER_FLOW_AUTO_WINDOW = 8
+const ORDER_FLOW_TARGET_WINDOW_ROWS = 22
+const ORDER_FLOW_TARGET_BAR_ROWS = 10
+const NICE_PRICE_STEPS = [1, 2, 2.5, 5] as const
+
+/**
+ * Pick a clean, exchange-aligned tick multiplier for Order Flow rows based on
+ * the recent visible window's price span and typical candle range (GoCharting-style
+ * auto precision so every row stays tall enough for crisp Bid x Ask labels).
+ */
+export function autoOrderFlowRowTicks(
+  bars: readonly Bar[],
+  tickSize: number,
+  fallbackTicks = 10,
+  previousTicks?: number
+): number {
+  const safeFallback = Math.max(1, Math.round(fallbackTicks))
+  if (!bars.length || !(tickSize > 0) || !Number.isFinite(tickSize)) {
+    return safeFallback
+  }
+  const recent = bars.slice(-ORDER_FLOW_AUTO_WINDOW)
+  let low = Number.POSITIVE_INFINITY
+  let high = Number.NEGATIVE_INFINITY
+  for (const bar of recent) {
+    if (Number.isFinite(bar.low)) low = Math.min(low, bar.low)
+    if (Number.isFinite(bar.high)) high = Math.max(high, bar.high)
+  }
+  const windowSpan = Number.isFinite(low) && Number.isFinite(high) ? Math.max(0, high - low) : 0
+
+  const spans: number[] = []
+  for (const bar of bars.slice(-24)) {
+    if (Number.isFinite(bar.high) && Number.isFinite(bar.low) && bar.high >= bar.low) {
+      const span = bar.high - bar.low
+      if (span > 0) spans.push(span)
+    }
+  }
+  spans.sort((a, b) => a - b)
+  const medianSpan = spans.length ? spans[Math.floor(spans.length / 2)] : 0
+
+  const desiredStep = Math.max(
+    windowSpan / ORDER_FLOW_TARGET_WINDOW_ROWS,
+    medianSpan / ORDER_FLOW_TARGET_BAR_ROWS
+  )
+  if (!(desiredStep > 0)) return 1
+
+  // Keep the active auto step steady across small live-tick fluctuations.
+  if (previousTicks && previousTicks >= 1) {
+    const currentStep = previousTicks * tickSize
+    if (desiredStep >= currentStep * 0.62 && desiredStep <= currentStep * 1.25) {
+      return previousTicks
+    }
+  }
+
+  const rawTicks = Math.max(1, desiredStep / tickSize)
+  if (rawTicks <= 1.25) return 1
+
+  const expMin = Math.floor(Math.log10(tickSize)) - 1
+  const expMax = Math.ceil(Math.log10(Math.max(desiredStep, tickSize))) + 2
+  const candidates = new Set<number>([1])
+  for (let exp = expMin; exp <= expMax; exp++) {
+    const scale = 10 ** exp
+    for (const base of NICE_PRICE_STEPS) {
+      const step = base * scale
+      const ticks = step / tickSize
+      const rounded = Math.round(ticks)
+      if (rounded >= 1 && rounded <= 10_000 && Math.abs(ticks - rounded) < 1e-5) {
+        candidates.add(rounded)
+      }
+    }
+  }
+  if (candidates.size < 4) {
+    for (const mult of [1, 2, 4, 5, 10, 20, 25, 50, 100, 200, 500, 1000, 2000, 5000, 10_000]) {
+      candidates.add(mult)
+    }
+  }
+
+  const sorted = [...candidates].sort((a, b) => a - b)
+  let best = sorted[sorted.length - 1]
+  let bestDist = Number.POSITIVE_INFINITY
+  const logTarget = Math.log(rawTicks)
+  for (const cand of sorted) {
+    const dist = Math.abs(Math.log(cand) - logTarget)
+    if (dist < bestDist) {
+      bestDist = dist
+      best = cand
+    }
+  }
+  return Math.max(1, Math.min(10_000, best))
+}
+
 /** The library's footprint options for these settings. Row height comes from each bar. */
 function footprintOptions(
   settings: OrderFlowSettings,
   context: ChartProfileContext
 ): Partial<FootprintOptions> {
-  const themeColors = settings.theme === 'default' ? {} : FOOTPRINT_THEMES[settings.theme]
+  const themeColors: Partial<FootprintOptions> =
+    settings.theme === 'default' ? {} : FOOTPRINT_THEMES[settings.theme]
   return {
     ...themeColors,
     displayMode: settings.displayMode,
     cellStyle: settings.cellStyle,
     textColorMode: settings.textColorMode,
+    font: 10,
     minTextHeight: 8,
+    textFade: 2,
     timezone: context.timezone,
     cvdReset: 'session',
     volumeDivisor: settings.volumeDivisor,
     showPoc: settings.showPoc,
     pocStyle: 'outline',
-    pocColor: '#e2e8f0',
+    pocColor: themeColors.pocColor ?? '#e2e8f0',
     showValueArea: settings.showValueArea,
     // The footprint takes a fraction of volume; the setting is a percentage.
     valueAreaPercent: settings.valueAreaPercent / 100,
     showDeltaLabels: false,
+    markDivergence: settings.markDivergence,
     statsPosition: 'bar',
     statsRows: settings.showBarCards ? ['volume', 'delta', 'deltaPct'] : [],
     tableRows: settings.showSummaryTable ? ['volume', 'delta', 'deltaPct', 'cvd'] : [],
     showVisibleProfile: settings.showVisibleProfile,
     showEmptyRows: settings.showEmptyRows,
+    showUnfinishedAuctions: settings.showUnfinishedAuctions,
+    lastPriceColor: themeColors.lastPriceColor ?? '#38bdf8',
     imbalanceRatio: settings.imbalanceRatio,
     imbalanceThreshold: settings.imbalanceThreshold,
     stackedImbalances: settings.stackedImbalances,
@@ -1165,8 +1261,9 @@ function footprintOptions(
 
 /**
  * Approximate a FootprintBar from a historical OHLCV bar when live tick data
- * is unavailable. Volume is distributed across price rows with a slight body
- * weight and split into bid/ask using the bar's close position in [low, high].
+ * is unavailable. Volume concentrates inside the candle body vs wicks using
+ * exact integer volume conservation, and splits into bid/ask from candle
+ * direction and price position within [low, high].
  */
 function buildHistoricalFootprintBar(bar: Bar, rowSize: number): FootprintBar | null {
   if (
@@ -1179,51 +1276,81 @@ function buildHistoricalFootprintBar(bar: Bar, rowSize: number): FootprintBar | 
     return null
   }
   const span = bar.high - bar.low
-  const step = span / rowSize > MAX_PROFILE_ROWS ? span / MAX_PROFILE_ROWS : rowSize
+  const step =
+    span / rowSize > MAX_PROFILE_ROWS
+      ? rowSize * Math.ceil(span / (rowSize * MAX_PROFILE_ROWS))
+      : rowSize
   const buckets = priceBuckets(bar.low, bar.high, step)
   if (!buckets.length) return null
 
-  const askRatio =
-    span > 0
-      ? Math.min(0.85, Math.max(0.15, 0.2 + 0.6 * ((bar.close - bar.low) / span)))
-      : bar.close > bar.open
-        ? 0.7
-        : bar.close < bar.open
-          ? 0.3
-          : 0.5
-
-  const midBody = (bar.open + bar.close) * 0.5
+  const bodyLow = Math.min(bar.open, bar.close)
+  const bodyHigh = Math.max(bar.open, bar.close)
+  const midBody = (bodyLow + bodyHigh) * 0.5
+  const bodyHalf = Math.max(step, (bodyHigh - bodyLow) * 0.5)
   const halfSpan = Math.max(step, span * 0.5)
-  const weights = buckets.map((price, idx) => {
-    const dist = Math.abs(price - midBody) / halfSpan
-    const bell = Math.exp(-1.8 * dist * dist)
-    // Slight deterministic variation so adjacent rows form natural POC/imbalances.
-    const ripple = 0.75 + 0.5 * (((idx * 7 + Math.round(bar.time)) % 5) / 4)
-    return bell * ripple
+  const upperWickSpan = Math.max(step, bar.high - bodyHigh)
+  const lowerWickSpan = Math.max(step, bodyLow - bar.low)
+
+  const weights = buckets.map((price) => {
+    const inBody = price >= bodyLow - step * 0.5 && price <= bodyHigh + step * 0.5
+    const structure = inBody
+      ? 1.0 + 0.65 * Math.exp(-1.5 * ((price - midBody) / bodyHalf) ** 2)
+      : price > bodyHigh
+        ? 0.25 + 0.55 * Math.exp(-2.2 * ((price - bodyHigh) / upperWickSpan) ** 2)
+        : 0.25 + 0.55 * Math.exp(-2.2 * ((bodyLow - price) / lowerWickSpan) ** 2)
+    const envelope = 0.65 + 0.35 * Math.exp(-1.2 * ((price - midBody) / halfSpan) ** 2)
+    return structure * envelope
   })
   const totalWeight = weights.reduce((sum, w) => sum + w, 0)
+
+  // Conserve total candle volume exactly via largest-remainder rounding.
+  const targetVol = Math.max(1, Math.round(bar.volume))
+  const exact = weights.map((w) => (targetVol * w) / totalWeight)
+  const rowTotals = exact.map((v) => Math.floor(v))
+  let remainder = targetVol - rowTotals.reduce((sum, v) => sum + v, 0)
+  if (remainder > 0) {
+    const order = exact
+      .map((v, idx) => ({ idx, frac: v - rowTotals[idx] }))
+      .sort((a, b) => b.frac - a.frac)
+    for (let k = 0; k < remainder && k < order.length; k++) {
+      rowTotals[order[k].idx] += 1
+    }
+  }
+
+  const baseAsk =
+    span > 0
+      ? Math.min(
+          0.82,
+          Math.max(
+            0.18,
+            0.5 + 0.22 * ((bar.close - bar.open) / span) + 0.16 * ((bar.close - bar.low) / span - 0.5)
+          )
+        )
+      : bar.close > bar.open
+        ? 0.68
+        : bar.close < bar.open
+          ? 0.32
+          : 0.5
 
   const cells: FootprintCell[] = []
   let delta = 0
   for (let i = 0; i < buckets.length; i++) {
-    const rowVol = (bar.volume * weights[i]) / totalWeight
-    const total = Math.round(rowVol)
-    // Tilt bid/ask by row position and allow occasional one-sided rows near extremes.
+    const total = rowTotals[i]
+    if (total <= 0) continue
+    const price = buckets[i]
     const rowPos = buckets.length > 1 ? i / (buckets.length - 1) : 0.5
-    const hash = Math.abs(Math.round(bar.time) * 31 + i * 17) % 11
-    let rowAskRatio = Math.min(0.92, Math.max(0.08, askRatio + (rowPos - 0.5) * 0.25))
-    if (hash === 0) rowAskRatio = 0
-    else if (hash === 10) rowAskRatio = 1
-    const askVol = Math.round(rowVol * rowAskRatio)
+    let rowAsk = baseAsk + (rowPos - 0.5) * 0.16
+    if (price > bodyHigh + step * 0.25) rowAsk -= 0.08
+    else if (price < bodyLow - step * 0.25) rowAsk += 0.08
+    const rowAskRatio = Math.min(0.9, Math.max(0.1, rowAsk))
+    const askVol = Math.round(total * rowAskRatio)
     const bidVol = Math.max(0, total - askVol)
-    if (askVol > 0 || bidVol > 0) {
-      cells.push({ price: buckets[i], bidVol, askVol })
-      delta += askVol - bidVol
-    }
+    cells.push({ price, bidVol, askVol })
+    delta += askVol - bidVol
   }
   if (!cells.length) {
-    const askVol = Math.round(bar.volume * askRatio)
-    const bidVol = Math.max(0, Math.round(bar.volume) - askVol)
+    const askVol = Math.round(targetVol * baseAsk)
+    const bidVol = Math.max(0, targetVol - askVol)
     const fallbackPrice = buckets[Math.floor(buckets.length / 2)]
     cells.push({ price: fallbackPrice, bidVol, askVol })
     delta = askVol - bidVol
@@ -1251,6 +1378,7 @@ class OrderFlowChartProfile implements ChartProfile {
   private settings: OrderFlowSettings
   private context: ChartProfileContext
   private sourceBars: readonly Bar[] = []
+  private autoRowTicks: number | undefined
   private historicalCache = new Map<number, { key: string; fp: FootprintBar | null }>()
 
   constructor(settings: OrderFlowSettings, context: ChartProfileContext) {
@@ -1264,6 +1392,21 @@ class OrderFlowChartProfile implements ChartProfile {
     return this.context.orderFlow?.() ?? null
   }
 
+  private effectiveRowTicks(tickSize: number): number {
+    if (this.settings.rowSizeMode === 'manual') {
+      this.autoRowTicks = undefined
+      return Math.max(1, this.settings.ticksPerRow)
+    }
+    const ticks = autoOrderFlowRowTicks(
+      this.sourceBars,
+      tickSize,
+      this.settings.ticksPerRow,
+      this.autoRowTicks
+    )
+    this.autoRowTicks = ticks
+    return ticks
+  }
+
   private historicalBar(bar: Bar, rowSize: number): FootprintBar | null {
     const key = `${bar.open}|${bar.high}|${bar.low}|${bar.close}|${bar.volume ?? 0}|${rowSize}`
     const cached = this.historicalCache.get(bar.time)
@@ -1274,15 +1417,20 @@ class OrderFlowChartProfile implements ChartProfile {
   }
 
   private sync(): void {
+    const tickSize =
+      Number.isFinite(this.context.tickSize) && this.context.tickSize >= 1e-8
+        ? this.context.tickSize
+        : 0.05
+    const rowTicks = this.effectiveRowTicks(tickSize)
     const feed = this.feed()
-    feed?.configure(this.settings.ticksPerRow, this.settings.minTradeSize)
+    feed?.configure(rowTicks, this.settings.minTradeSize)
     const liveBars = feed?.bars() ?? []
     const liveByTime = new Map<number, FootprintBar>()
     for (const bar of liveBars) {
       if (bar.cells.length > 0) liveByTime.set(bar.time, bar)
     }
 
-    const rowSize = Math.max(1e-9, this.context.tickSize) * Math.max(1, this.settings.ticksPerRow)
+    const rowSize = tickSize * rowTicks
     const merged: FootprintBar[] = []
     for (const bar of this.sourceBars) {
       const live = liveByTime.get(bar.time)
@@ -1329,9 +1477,11 @@ class OrderFlowChartProfile implements ChartProfile {
   setSettings(settings: ProfileSettings, context = this.context): void {
     if (settings.kind !== 'order-flow') return
     if (
+      settings.rowSizeMode !== this.settings.rowSizeMode ||
       settings.ticksPerRow !== this.settings.ticksPerRow ||
       context.tickSize !== this.context.tickSize
     ) {
+      this.autoRowTicks = undefined
       this.historicalCache.clear()
     }
     this.settings = settings

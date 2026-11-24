@@ -18,7 +18,7 @@ import { join } from 'node:path'
 import { CandleBuilder, type IndicatorState } from 'openalgo-charts'
 import { describe, expect, it, vi } from 'vitest'
 
-import { priceDp } from './format'
+import { priceDp, tickSize } from './format'
 import {
   buildOrderTicket,
   dedupeIndicators,
@@ -219,6 +219,15 @@ describe('resolveTick', () => {
     expect(resolveTick('NSE', 0)).toBe(0.05)
     expect(resolveTick('NSE', undefined)).toBe(0.05)
     expect(resolveTick('NSE', 'nonsense')).toBe(0.05)
+  })
+
+  it('normalizes paise-scaled ticks on high-priced NSE stocks like HBLENGINE and RELIANCE', () => {
+    expect(tickSize(5, 650)).toBe(0.05)
+    expect(tickSize(10, 1400)).toBe(0.1)
+    expect(tickSize(1, 150)).toBe(0.01)
+    // Legitimate coarse rupee ticks on high-priced instruments stay intact.
+    expect(tickSize(1, 10_500)).toBe(1)
+    expect(tickSize(5, 25_000)).toBe(5)
   })
 })
 

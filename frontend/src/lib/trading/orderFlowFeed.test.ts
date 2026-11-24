@@ -41,6 +41,17 @@ describe('OrderFlowFeed quantity', () => {
     expect(f.bars()[0].delta).toBe(20)
   })
 
+  it('classifies aggressive side from bid/ask quotes when present', () => {
+    const f = feed()
+    f.ingest({ ltp: 650.0, volume: 1000, bid: 649.95, ask: 650.05, timeSec: 10 })
+    // Trade at bid despite unchanged price is seller-initiated.
+    f.ingest({ ltp: 649.95, volume: 1050, bid: 649.95, ask: 650.05, timeSec: 11 })
+    expect(f.bars()[0].delta).toBe(-50)
+    // Trade at ask is buyer-initiated.
+    f.ingest({ ltp: 650.05, volume: 1120, bid: 649.95, ask: 650.05, timeSec: 12 })
+    expect(f.bars()[0].delta).toBe(20)
+  })
+
   it('falls back to the last traded quantity when the feed has no volume', () => {
     const f = feed()
     expect(f.ingest({ ltp: 100, ltq: 25, timeSec: 10 })).toBe(true)
