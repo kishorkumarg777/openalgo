@@ -57,6 +57,9 @@ _DOCUMENTED_RATE = {
 # ours - hitting the ceiling exactly is how you still collect a 429.
 _HEADROOM = 0.8
 _RATE_PER_SECOND = {k: v * _HEADROOM for k, v in _DOCUMENTED_RATE.items()}
+# INDstocks /market/historical/* trips 429 retries at 4.0 req/s on bursty
+# multi-chunk chart loads; 3.0 req/s avoids 1s-2s backoff penalties.
+_RATE_PER_SECOND["data"] = 3.0
 
 # Daily request cap. Order APIs have no documented daily limit.
 _DAILY_CAP = 100_000

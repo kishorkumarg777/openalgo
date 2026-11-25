@@ -907,7 +907,10 @@ class BrokerData:
 
             logger.debug(f"Timestamp range: {start_timestamp} to {end_timestamp}")
 
-            # Check if date range exceeds Indmoney limits
+            # Check if date range exceeds Indmoney limits.
+            # Daily/weekly/monthly endpoints accept a full 366-day leap year in
+            # one call (~249 trading days), avoiding a 1-day sliver chunk on
+            # 3-year / 5-year / 10-year chart lookbacks.
             max_ranges = {
                 "1minute": 7,
                 "2minute": 7,
@@ -921,10 +924,19 @@ class BrokerData:
                 "120minute": 14,
                 "180minute": 14,
                 "240minute": 14,  # 14 days
-                "1day": 365,
-                "1week": 365,
-                "1month": 365,  # 1 year
+                "1day": 366,
+                "1week": 366,
+                "1month": 366,  # 1 year (incl. leap year)
             }
+
+            # INDstocks 1day/1week/1month endpoints drop today's candle (or return
+            # empty) when a chunk spans too few calendar days (e.g. a 1-3 day tail
+            # refresh). Pad short chunks backward and filter back to [start, end].
+            min_fetch_days = {
+                "1day": 10,
+                "1week": 21,
+                "1month": 65,
+            }.get(indmoney_interval, 0)
 
             max_days = max_ranges.get(indmoney_interval, 7)
             date_chunks = self._split_date_range(start_date, end_date, max_days)
@@ -932,13 +944,24 @@ class BrokerData:
             logger.debug(f"Split into {len(date_chunks)} chunks: {date_chunks}")
 
             all_candles = []
+            padded_any = False
 
             for chunk_start, chunk_end in date_chunks:
                 # Pacing is handled centrally by rate_limiter (data bucket), which
                 # also paces against concurrent callers - a local sleep here would
                 # only compound it.
                 try:
-                    chunk_start_ts = self._date_to_timestamp_ms(chunk_start)
+                    fetch_start = chunk_start
+                    if min_fetch_days > 0:
+                        cs_dt = datetime.strptime(chunk_start, "%Y-%m-%d")
+                        ce_dt = datetime.strptime(chunk_end, "%Y-%m-%d")
+                        if (ce_dt - cs_dt).days + 1 < min_fetch_days:
+                            fetch_start = (ce_dt - timedelta(days=min_fetch_days - 1)).strftime(
+                                "%Y-%m-%d"
+                            )
+                            padded_any = True
+
+                    chunk_start_ts = self._date_to_timestamp_ms(fetch_start)
                     chunk_end_ts = self._date_to_timestamp_ms(chunk_end, end_of_day=True)
 
                     params = {
@@ -1072,6 +1095,21 @@ class BrokerData:
                     .drop_duplicates(subset=["timestamp"])
                     .reset_index(drop=True)
                 )
+                if padded_any and not df.empty:
+                    end_sec = end_timestamp // 1000
+                    if indmoney_interval == "1week":
+                        # Weekly bars are stamped on the week's opening day, which
+                        # can precede start_date by up to 6 days.
+                        start_sec = (start_timestamp // 1000) - 6 * 86400
+                    elif indmoney_interval == "1month":
+                        # Monthly bars are stamped on the month's first trading day.
+                        start_month = datetime.strptime(start_date, "%Y-%m-%d").replace(day=1)
+                        start_sec = int(start_month.timestamp())
+                    else:
+                        start_sec = start_timestamp // 1000
+                    df = df[
+                        (df["timestamp"] >= start_sec) & (df["timestamp"] <= end_sec)
+                    ].reset_index(drop=True)
                 logger.debug(f"Successfully fetched {len(df)} candles after deduplication")
                 logger.debug(
                     f"Sample data: {df.head(3).to_dict('records') if len(df) > 0 else 'No data'}"
@@ -1103,19 +1141,24 @@ class BrokerData:
         return timestamp_ms
 
     def _split_date_range(self, start_date: str, end_date: str, max_days: int) -> list:
-        """Split date range into chunks based on Indmoney API limits"""
+        """Split date range into chunks anchored backward from end_date so the
+        newest chunk always covers a full window ending on end_date (avoiding
+        1-day tail chunks on today that INDstocks 1day/1week/1month drop)."""
 
         start = datetime.strptime(start_date, "%Y-%m-%d")
         end = datetime.strptime(end_date, "%Y-%m-%d")
+        if start > end:
+            return []
         chunks = []
 
-        current = start
         step_days = max(1, int(max_days))
-        while current <= end:
-            chunk_end = min(current + timedelta(days=step_days - 1), end)
-            chunks.append((current.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")))
-            current = chunk_end + timedelta(days=1)
+        current_end = end
+        while current_end >= start:
+            chunk_start = max(start, current_end - timedelta(days=step_days - 1))
+            chunks.append((chunk_start.strftime("%Y-%m-%d"), current_end.strftime("%Y-%m-%d")))
+            current_end = chunk_start - timedelta(days=1)
 
+        chunks.reverse()
         return chunks
 
     def get_intervals(self) -> list:

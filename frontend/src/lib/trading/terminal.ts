@@ -6558,8 +6558,8 @@ export class TradingTerminal {
   /* ── WS-down fallback: poll quotes so LTP + the forming candle stay live ─ */
   private startLtpFallback() {
     if (this.ltpPollTimer) return
-    this.ltpPollTimer = setInterval(async () => {
-      if (!this.sym) return
+    const pollOnce = async () => {
+      if (this.destroyed || !this.sym) return
       if (this.sym.synthetic && this.expr) {
         // A combination polls each leg and folds, the same as the socket path.
         try {
@@ -6610,7 +6610,10 @@ export class TradingTerminal {
       } catch {
         /* next cycle */
       }
-    }, 4000)
+    }
+    // Fetch once immediately instead of waiting a full 4s interval on startup/reconnect.
+    void pollOnce()
+    this.ltpPollTimer = setInterval(() => void pollOnce(), 4000)
   }
   private stopLtpFallback() {
     if (this.ltpPollTimer) {
@@ -7503,6 +7506,21 @@ export class TradingTerminal {
     // Validate before assigning: an older response must neither overwrite the
     // active session nor recreate a chart after its terminal was destroyed.
     if (this.destroyed || ticket !== this.loadTicket) return false
+    // Track whether applyDataSnapshot already built or populated the chart for
+    // this exact data.load() so loadSymbol doesn't redundantly re-run
+    // setPriceData(), heavy indicators, and pollBook() a second time.
+    const key = this.dataKey({
+      symbol: this.sym.symbol,
+      exchange: this.sym.exchange,
+      interval: this.interval,
+    })
+    const alreadyBuilt = Boolean(this.data && this.chart && this.price && this.volume && this.chartDataKey === key)
+    const alreadyCurrent =
+      alreadyBuilt &&
+      this.rawBars.length === bars.length &&
+      this.rawBars[0]?.time === bars[0]?.time &&
+      this.rawBars[this.rawBars.length - 1]?.time === bars[bars.length - 1]?.time &&
+      this.rawBars[this.rawBars.length - 1]?.close === bars[bars.length - 1]?.close
     this.rawBars = [...bars]
     if (!this.rawBars.length) {
       if (!opts.silent) {
@@ -7514,15 +7532,12 @@ export class TradingTerminal {
       return false
     }
     this.lastLtp = this.rawBars[this.rawBars.length - 1].close
-    const key = this.dataKey({
-      symbol: this.sym.symbol,
-      exchange: this.sym.exchange,
-      interval: this.interval,
-    })
+    let builtHere = false
     if (!this.chart || !this.price || !this.volume || this.chartDataKey !== key) {
       this.chartDataKey = key
       this.buildChart()
-    } else {
+      builtHere = true
+    } else if (!alreadyCurrent) {
       this.setPriceData()
       this.installComparisons()
     }
@@ -7531,7 +7546,8 @@ export class TradingTerminal {
 
     // live subscription (swap the previous symbol's stream)
     this.connectLive()
-    this.pollBook()
+    // buildChart() (either here or inside applyDataSnapshot) already fired pollBook().
+    if (!builtHere && !alreadyBuilt) this.pollBook()
     return true
   }
 

@@ -287,16 +287,66 @@ def test_indmoney_quote_mode_resolves_ltp_from_close_and_drops_zero_ltp(tmp_path
 
 
 def test_indmoney_split_date_range_includes_same_day_and_exact_boundaries():
-    """Same-day intraday history refreshes (start == end) and exact chunk-boundary
-    end dates must never return an empty chunk list."""
+    """Same-day intraday history refreshes (start == end) and multi-chunk ranges
+    must anchor backward from end_date so the newest chunk never collapses into a
+    1-day tail sliver on today."""
     from broker.indmoney.api.data import BrokerData
 
     bd = BrokerData("dummy-token")
     assert bd._split_date_range("2026-11-25", "2026-11-25", 7) == [("2026-11-25", "2026-11-25")]
     assert bd._split_date_range("2026-11-01", "2026-11-06", 5) == [
-        ("2026-11-01", "2026-11-05"),
-        ("2026-11-06", "2026-11-06"),
+        ("2026-11-01", "2026-11-01"),
+        ("2026-11-02", "2026-11-06"),
     ]
     assert bd._split_date_range("2026-11-24", "2026-11-25", 30) == [("2026-11-24", "2026-11-25")]
+    # 3-year daily lookback fits cleanly in 3 full chunks ending today (max_days=366)
+    chunks = bd._split_date_range("2023-11-26", "2026-11-25", 366)
+    assert len(chunks) == 3
+    assert chunks[0][0] == "2023-11-26"
+    assert chunks[-1] == ("2025-11-25", "2026-11-25")
+
+
+def test_indmoney_short_daily_window_pads_fetch_and_filters_to_requested_range():
+    """Short 1day windows (1-3 days) pad backward to >=10 days when querying
+    INDstocks so today's daily candle is not dropped, then filter strictly back
+    to the caller's [start_date, end_date]."""
+    from datetime import datetime
+    from broker.indmoney.api.data import BrokerData
+
+    bd = BrokerData("dummy-token")
+    captured = []
+
+    def fake_api(endpoint, auth, method="GET", params=None):
+        captured.append((endpoint, dict(params or {})))
+        # Simulate INDstocks returning candles when window >= 10 days
+        ts_nov20 = int(datetime(2026, 11, 20, 5, 30).timestamp())
+        ts_nov23 = int(datetime(2026, 11, 23, 5, 30).timestamp())
+        ts_nov25 = int(datetime(2026, 11, 25, 5, 30).timestamp())
+        return {
+            "data": {
+                "NSE_6994": {
+                    "candles": [
+                        {"ts": ts_nov20, "o": 295.5, "h": 311.8, "l": 293.8, "c": 303.15, "v": 1000},
+                        {"ts": ts_nov23, "o": 307.75, "h": 319.25, "l": 302.1, "c": 304.7, "v": 2000},
+                        {"ts": ts_nov25, "o": 309.75, "h": 311.1, "l": 296.6, "c": 299.25, "v": 3000},
+                    ]
+                }
+            }
+        }
+
+    with (
+        patch.object(bd, "_get_scrip_code", return_value="NSE_6994"),
+        patch("broker.indmoney.api.data.get_api_response", side_effect=fake_api),
+    ):
+        df = bd.get_history("BSOFT", "NSE", "D", "2026-11-23", "2026-11-25")
+
+    assert len(captured) == 1
+    assert captured[0][0] == "/market/historical/1day"
+    # Padded start_time should reach back to 2026-11-16 (10-day span ending Nov 25)
+    expected_start = str(bd._date_to_timestamp_ms("2026-11-16"))
+    assert captured[0][1]["start_time"] == expected_start
+    # Returned DataFrame is filtered strictly to Nov 23..Nov 25 (excludes Nov 20)
+    assert len(df) == 2
+    assert list(df["close"]) == [304.7, 299.25]
 
 
