@@ -285,3 +285,18 @@ def test_indmoney_quote_mode_resolves_ltp_from_close_and_drops_zero_ltp(tmp_path
     )
     assert len(published) == before
 
+
+def test_indmoney_split_date_range_includes_same_day_and_exact_boundaries():
+    """Same-day intraday history refreshes (start == end) and exact chunk-boundary
+    end dates must never return an empty chunk list."""
+    from broker.indmoney.api.data import BrokerData
+
+    bd = BrokerData("dummy-token")
+    assert bd._split_date_range("2026-11-25", "2026-11-25", 7) == [("2026-11-25", "2026-11-25")]
+    assert bd._split_date_range("2026-11-01", "2026-11-06", 5) == [
+        ("2026-11-01", "2026-11-05"),
+        ("2026-11-06", "2026-11-06"),
+    ]
+    assert bd._split_date_range("2026-11-24", "2026-11-25", 30) == [("2026-11-24", "2026-11-25")]
+
+

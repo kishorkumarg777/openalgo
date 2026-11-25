@@ -1110,8 +1110,9 @@ class BrokerData:
         chunks = []
 
         current = start
-        while current < end:
-            chunk_end = min(current + timedelta(days=max_days - 1), end)
+        step_days = max(1, int(max_days))
+        while current <= end:
+            chunk_end = min(current + timedelta(days=step_days - 1), end)
             chunks.append((current.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")))
             current = chunk_end + timedelta(days=1)
 

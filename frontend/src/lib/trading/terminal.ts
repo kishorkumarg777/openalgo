@@ -1149,6 +1149,7 @@ export class TradingTerminal {
   private volumeOn = true
   private gridV = true
   private gridH = true
+  private indicatorLegendCollapsed = false
   private drawShortcuts: Record<string, string> = {}
   private matchShortcut:
     | ((e: {
@@ -1868,6 +1869,16 @@ export class TradingTerminal {
 
     this.noMoreHistory = snapshot.hasMore === false
     if (snapshot.reason === 'live' || snapshot.reason === 'state') return
+    // A failed background poll emits `refresh` with `status: 'stale' | 'error'`
+    // and unchanged bars; avoid tearing down and repainting the live series.
+    if (
+      snapshot.reason === 'refresh' &&
+      (snapshot.status === 'stale' || snapshot.status === 'error') &&
+      this.chart &&
+      this.rawBars.length
+    ) {
+      return
+    }
 
     // While replay is paused, snapshots deliberately retain the display bars.
     // The controller's live store still accepts refreshes, pages and pushBar,
@@ -1887,10 +1898,16 @@ export class TradingTerminal {
     // straight back over the repair.
     if (snapshot.reason === 'refresh' && this.builder && this.liveBucket != null) {
       const current = this.builder.current()
-      const index = current ? next.findIndex((bar) => bar.time === current.time) : -1
-      if (current && index >= 0 && current.time === this.liveBucket) {
-        const reconciled = this.builder.reconcile(next[index])
-        if (reconciled) next[index] = reconciled
+      if (current && current.time === this.liveBucket) {
+        const index = next.findIndex((bar) => bar.time === current.time)
+        if (index >= 0) {
+          const reconciled = this.builder.reconcile(next[index])
+          if (reconciled) next[index] = reconciled
+        } else if (current.time > (next[next.length - 1]?.time ?? Number.NEGATIVE_INFINITY)) {
+          // Broker historical endpoints often lag 10–30s behind live ticks on
+          // fast intervals like 1m; never drop the forming bar on a refresh.
+          next.push({ ...current })
+        }
       }
     }
 
@@ -1930,7 +1947,7 @@ export class TradingTerminal {
    *
    * Returns false when the caller must rebuild instead.
    */
-  private updateLiveBar(bar: Bar): boolean {
+  private updateLiveBar(bar: Bar, flushProfile = false): boolean {
     if (!this.price || !this.volume) return false
     // `update` appends or replaces by time on its own, which is exactly the
     // append-or-replace the caller has already applied to `rawBars`.
@@ -1938,7 +1955,7 @@ export class TradingTerminal {
     if (this.transformed()) {
       this.setTransformedVolume(this.rawBars)
       this.shownCount = this.shownBars.length
-      this.profileLayer?.refresh()
+      this.profileLayer?.refresh(flushProfile)
       return true
     }
     const settings = volumeValues(this.chartSettingsSaved)
@@ -1966,7 +1983,7 @@ export class TradingTerminal {
     // Untransformed, the shown series *is* rawBars, which the caller mutated in
     // place, so only the count can have moved.
     this.shownCount = this.rawBars.length
-    this.profileLayer?.refresh()
+    this.profileLayer?.refresh(flushProfile)
     return true
   }
 
@@ -2477,6 +2494,8 @@ export class TradingTerminal {
       onError: (error) =>
         this.toast(`Profile could not be rendered: ${this.cleanError(error)}`, 'err'),
       onWarning: (message) => this.toast(message, ''),
+      // Order Flow updates at ~60fps so live 1m footprint cells tick smoothly.
+      coalesceMs: kind === 'order-flow' ? 16 : 100,
     })
     this.offProfileObject =
       this.objects?.register(profileObjectProvider(kind, () => this.requestChartSettings())) ?? null
@@ -2548,7 +2567,10 @@ export class TradingTerminal {
     this.followDrawingScope()
     this.offBranding?.()
     this.offBranding = null
-    if (this.chart) this.chart.destroy()
+    if (this.chart) {
+      this.syncIndicatorLegendCollapsed()
+      this.chart.destroy()
+    }
     this.priceAxis.detach()
     // The primitives registered here belonged to the chart just destroyed.
     this.screenshotExcluded.length = 0
@@ -2561,6 +2583,11 @@ export class TradingTerminal {
       theme,
       // Order Flow columns need wide bars (>68px) to display bid/ask numbers and bar cards.
       timeScale: this.ctype === 'order-flow' ? { maxBarSpacing: 220 } : undefined,
+      // Fit visible price bars on Order Flow so far-away overlay studies (e.g. SMC zones)
+      // never compress the footprint rows into a thin horizontal strip on load.
+      priceOnlyAutoScale: this.ctype === 'order-flow',
+      // Keep the indicator legend collapsed/expanded as the user left it across rebuilds.
+      indicatorLegendCollapsed: this.indicatorLegendCollapsed,
       // No `navigation` override. The engine's default is `mousePan: 'both'`,
       // and this used to pin it to `'horizontal'`, so dragging the plot moved
       // through time and never through price. It was set with the 2.4.5
@@ -2687,6 +2714,9 @@ export class TradingTerminal {
     // same one this host already formats and snaps orders with.
     const tick = this.tick()
     if (tick > 0) this.chart.setPriceScaleOptions({ minMove: tick })
+    // Order Flow draws a 3-row Volume/Delta/Delta% card below each column; reserve
+    // a slightly taller bottom margin by default so cards never clip on load.
+    if (this.ctype === 'order-flow') this.chart.setPriceScaleOptions({ marginBottom: 0.18 })
     // Volume rides an OVERLAY price scale inside the price pane rather than a
     // pane of its own: it autoscales independently but draws no axis, so the
     // right-hand column stays a clean price ladder instead of stacking a second
@@ -2884,7 +2914,10 @@ export class TradingTerminal {
     this.chart.on('paneCollapsed', () => this.storeFoldedPanes())
     // Visibility changes made from the Objects panel stay with the pane on a
     // chart rebuild, just like settings and removal from the canvas legend.
-    this.chart.on('objects:change', () => this.syncIndicators())
+    this.chart.on('objects:change', () => {
+      this.syncIndicatorLegendCollapsed()
+      this.syncIndicators()
+    })
     // Scrolling back past the loaded range pages in older bars.
     this.chart.setHistoryLoader(() => void this.loadOlderHistory())
 
@@ -2970,6 +3003,7 @@ export class TradingTerminal {
       this.gridV = grid[0] === '1'
       this.gridH = grid[1] === '1'
     }
+    this.indicatorLegendCollapsed = this.lsGet('indicator-legend-collapsed') === '1'
     // Absent means shown: only an explicit '0' hides it, so existing panes and
     // a first visit both keep volume.
     this.volumeOn = this.lsGet('vol') !== '0'
@@ -4096,9 +4130,23 @@ export class TradingTerminal {
     chart.setAlertState(this.alertJson)
     this.attachAlerts(chart)
     this.restoreFoldedPanes(chart)
+    if (chart.indicatorLegendCollapsed() !== this.indicatorLegendCollapsed) {
+      chart.setIndicatorLegendCollapsed(this.indicatorLegendCollapsed)
+    }
     this.followHistory()
     // The restore needed only its own studies; the picker needs everything.
     this.completeIndicatorCatalogue()
+  }
+
+  /** Persist whether the main-pane Indicators legend group is collapsed. */
+  private syncIndicatorLegendCollapsed(): void {
+    const chart = this.chart
+    if (!chart || this.destroyed) return
+    const collapsed = chart.indicatorLegendCollapsed()
+    if (collapsed !== this.indicatorLegendCollapsed) {
+      this.indicatorLegendCollapsed = collapsed
+      this.lsSet('indicator-legend-collapsed', collapsed ? '1' : '0')
+    }
   }
 
   /* ── folded study panes, kept beside the saved studies ───────────────── */
@@ -4148,6 +4196,7 @@ export class TradingTerminal {
     if (this.destroyed) return false
     const moved = this.undoHistory.press(direction, this.chart, this.draw)
     if (moved) {
+      this.syncIndicatorLegendCollapsed()
       this.syncIndicators()
       this.storeFoldedPanes()
       if (this.draw) this.afterDrawChange()
@@ -6590,7 +6639,8 @@ export class TradingTerminal {
       this.liveQuoteBook && this.liveQuoteBook.symbol === this.sym.symbol
         ? this.liveQuoteBook
         : null
-    if (
+    const prevOrderFlowBarTime = this.orderFlowFeed?.lastBarTime() ?? null
+    const orderFlowRecorded =
       this.orderFlowFeed?.ingest({
         ltp: e.ltp,
         ltq: e.ltq,
@@ -6598,11 +6648,18 @@ export class TradingTerminal {
         bid: e.bid ?? book?.bid,
         ask: e.ask ?? book?.ask,
         timeSec: tickTime,
-      })
-    ) {
-      this.profileLayer?.refresh()
+      }) ?? false
+    const orderFlowNewBar =
+      orderFlowRecorded && this.orderFlowFeed?.lastBarTime() !== prevOrderFlowBarTime
+    if (orderFlowRecorded) {
       this.emitOrderFlowState(false)
     }
+    const effectiveLtq =
+      typeof e.ltq === 'number' && Number.isFinite(e.ltq) && e.ltq > 0
+        ? e.ltq
+        : orderFlowRecorded
+          ? this.orderFlowFeed?.lastTradeQty()
+          : e.ltq
     // Recolour with the price: the line belongs to the forming candle, so it
     // follows that candle's direction rather than sitting amber forever.
     if (this.position && this.posLine) this.posLine.setLeftLabel(this.posLabel())
@@ -6610,7 +6667,7 @@ export class TradingTerminal {
     if (this.builder) {
       let u
       try {
-        u = this.builder.onTick({ time: tickTime, price: e.ltp, ltq: e.ltq })
+        u = this.builder.onTick({ time: tickTime, price: e.ltp, ltq: effectiveLtq })
       } catch {
         return
       } // A late after-hours quote must not open a new session candle.
@@ -6639,9 +6696,16 @@ export class TradingTerminal {
           this.cb.onLtp(e.ltp)
           return
         }
+        // Flush Order Flow synchronously when a new candle opens or gains its
+        // first footprint cells so the bar never disappears for a blank frame.
+        const flushProfileNow = this.ctype === 'order-flow' && (u.isNew || orderFlowNewBar)
         // One bar in, one bar out. Only a transformed chart has to rebuild.
-        if (!this.updateLiveBar(u.bar)) this.setPriceData()
+        if (!this.updateLiveBar(u.bar, flushProfileNow)) this.setPriceData()
+      } else if (orderFlowRecorded) {
+        this.profileLayer?.refresh(orderFlowNewBar)
       }
+    } else if (orderFlowRecorded) {
+      this.profileLayer?.refresh(orderFlowNewBar)
     }
     // The legend belongs to the bar on screen. During replay that is the
     // playhead's, written by onReplayChange, not the live one.
@@ -7189,6 +7253,9 @@ export class TradingTerminal {
     const inner = this.timeframes?.feed ?? this.cachedBars ?? this.rest
     if (!inner) return false
     const feed = this.exprFeed ?? new ExpressionFeed(inner, () => this.exprLegExchange)
+    this.builder = null
+    this.orderFlowFeed = null
+    this.orderFlowGeneration += 1
     let bars: readonly Bar[]
     try {
       bars = this.data ? await this.data.load(request) : await feed.getBars(request)
@@ -7410,6 +7477,12 @@ export class TradingTerminal {
     this.lastLtp = null
     this.liveBucket = null
     this.noMoreHistory = false
+    // Detach the previous timeframe's live builder and Order Flow feed while the
+    // new history is in flight so ticks from the old interval cannot bleed into
+    // `this.data` (e.g. a 1m 13:00 bar corrupting a 1h 12:15 chart).
+    this.builder = null
+    this.orderFlowFeed = null
+    this.orderFlowGeneration += 1
     let bars: readonly Bar[]
     try {
       const request = {

@@ -21,6 +21,8 @@ interface ProfileLayerOptions {
   readBars(): readonly Bar[]
   onError(error: unknown): void
   onWarning?(message: string): void
+  /** Coalesce window for non-immediate live refreshes (ms). Defaults to 100. */
+  coalesceMs?: number
 }
 
 /** Owns lazy profile attachment and coalesces ticks for one chart lifetime. */
@@ -62,10 +64,11 @@ export class ProfileLayer {
         this.options.onError(error)
       }
     } else if (this.timer === null) {
+      const delay = this.options.coalesceMs ?? 100
       this.timer = setTimeout(() => {
         this.timer = null
         this.refresh(true)
-      }, 100)
+      }, delay)
     }
   }
 

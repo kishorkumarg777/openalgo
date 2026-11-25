@@ -277,4 +277,14 @@ describe('order flow profile', () => {
     // The corrupted 0.00 bar is skipped rather than filling footprints down to 0.00.
     expect(fp._bars.map((b) => b.time)).toEqual([0, 14400, 28800])
   })
+
+  it('delegates visible autoscale to the primary OHLC series so old history never flattens footprints', () => {
+    const profile = createChartProfile('order-flow', settings(), { ...context, tickSize: 0.05 })
+    profile.attached?.({ requestUpdate: vi.fn() })
+    profile.setBars([
+      { time: 0, open: 880, high: 885, low: 875, close: 878, volume: 10_000 },
+      { time: 60, open: 776.5, high: 777.0, low: 776.0, close: 776.5, volume: 500 },
+    ])
+    expect(profile.autoscaleInfo?.()).toBeNull()
+  })
 })

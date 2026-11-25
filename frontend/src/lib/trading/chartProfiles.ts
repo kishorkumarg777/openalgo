@@ -1191,7 +1191,7 @@ export function autoOrderFlowRowTicks(
   // Keep the active auto step steady across small live-tick fluctuations.
   if (previousTicks && previousTicks >= 1) {
     const currentStep = previousTicks * tickSize
-    if (desiredStep >= currentStep * 0.62 && desiredStep <= currentStep * 1.25) {
+    if (desiredStep >= currentStep * 0.5 && desiredStep <= currentStep * 1.5) {
       return previousTicks
     }
   }
@@ -1476,7 +1476,7 @@ class OrderFlowChartProfile implements ChartProfile {
                 open: bar.open,
                 high: Math.max(bar.high, live.high ?? bar.high),
                 low: Math.min(bar.low, live.low ?? bar.low),
-                close: live.close ?? bar.close,
+                close: bar.close,
               }
             : live
         )
@@ -1508,8 +1508,10 @@ class OrderFlowChartProfile implements ChartProfile {
   draw(ctx: CanvasRenderingContext2D, rc: PrimitiveRenderContext): void {
     this.footprint.draw(ctx, rc)
   }
-  autoscaleInfo() {
-    return this.footprint.autoscaleInfo()
+  // The primary OHLC series owns visible-window autoscale; historical footprint
+  // bars outside the viewport must never flatten the visible rows.
+  autoscaleInfo(): null {
+    return null
   }
   hitTest(x: number, y: number) {
     return this.footprint.hitTest(x, y)

@@ -85,6 +85,7 @@ export class OrderFlowFeed {
   private seen = 0
   private recorded = 0
   private hydrated = 0
+  private lastQty = 0
 
   constructor(opts: OrderFlowFeedOptions) {
     this.opts = { ...opts }
@@ -106,6 +107,7 @@ export class OrderFlowFeed {
    * carried none (a price refresh, the first volume reading, a bad value).
    */
   ingest(tick: OrderFlowTick): boolean {
+    this.lastQty = 0
     if (!(tick.ltp > 0) || !Number.isFinite(tick.ltp) || !Number.isFinite(tick.timeSec)) {
       return false
     }
@@ -121,6 +123,7 @@ export class OrderFlowFeed {
     const side = this.classify({ price: tick.ltp, qty, bid, ask })
     const print: FootprintTick = { time, price: tick.ltp, qty, side }
     this.lastTime = time
+    this.lastQty = qty
     this.ticks.push(print)
     this.apply(print)
     this.recorded += 1
@@ -265,5 +268,15 @@ export class OrderFlowFeed {
   /** Active tick multiplier for this feed's aggregator. */
   currentRowTicks(): number {
     return this.opts.rowTicks
+  }
+
+  /** Quantity recorded by the most recent live `ingest()` call, or 0 if none. */
+  lastTradeQty(): number {
+    return this.lastQty
+  }
+
+  /** Timestamp of the newest footprint bar, or null before any print arrives. */
+  lastBarTime(): number | null {
+    return this.list.length ? this.list[this.list.length - 1].time : null
   }
 }
