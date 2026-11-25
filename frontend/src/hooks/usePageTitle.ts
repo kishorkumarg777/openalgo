@@ -26,6 +26,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/sandbox/mypnl': 'Sandbox P&L',
   '/analyzer': 'Analyzer',
   '/tools': 'Tools',
+  '/screener': 'SMC Stock Screener',
   '/strategybuilder': 'Strategy Builder',
   '/strategybuilder/portfolio': 'Strategy Portfolio',
   '/optionchain': 'Option Chain',

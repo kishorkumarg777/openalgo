@@ -50,6 +50,7 @@ from .pnl_symbols import api as pnl_symbols_ns
 from .portfolio import api as portfolio_ns
 from .positionbook import api as positionbook_ns
 from .quotes import api as quotes_ns
+from .screener import api as screener_ns
 from .search import api as search_ns
 from .sector_rotation import api as sector_rotation_ns
 from .sip import api as sip_ns
@@ -76,6 +77,7 @@ api.add_namespace(history_ns, path="/history")
 api.add_namespace(portfolio_ns, path="/portfolio")
 api.add_namespace(sip_ns, path="/sip")
 api.add_namespace(sector_rotation_ns, path="/sectorrotation")
+api.add_namespace(screener_ns, path="/screener")
 api.add_namespace(depth_ns, path="/depth")
 api.add_namespace(option_chain_ns, path="/optionchain")
 api.add_namespace(intervals_ns, path="/intervals")

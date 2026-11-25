@@ -283,6 +283,12 @@ def react_sector_rotation():
     return serve_react_app()
 
 
+# SMC Stock Screener
+@react_bp.route("/screener", strict_slashes=False)
+def react_screener():
+    return serve_react_app()
+
+
 # The former path. Kept so an existing bookmark reaches the SPA, which
 # redirects it to the new one rather than showing a not-found.
 @react_bp.route("/portfolio")

@@ -56,6 +56,13 @@ export const tools: Tool[] = [
     color: 'bg-cyan-500',
   },
   {
+    title: 'SMC Stock Screener',
+    description:
+      '8 LuxAlgo-compatible Smart Money Concepts screeners for Order Blocks, Bullish Breakers (+BB), Potential OBs, SSL Sweeps, MTF confluence and SMC X-Ray Explain',
+    href: '/screener',
+    color: 'bg-indigo-500',
+  },
+  {
     title: 'Option Chain',
     description: 'Real-time option chain with live Greeks, OI data, and quick order placement',
     href: '/optionchain',
