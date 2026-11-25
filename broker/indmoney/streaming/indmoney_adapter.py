@@ -621,6 +621,16 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
             cache_key = f"{symbol}_{exchange}"
             market_data = self._normalize_market_data(message, mode, cache_key)
 
+            # Never publish ticks with missing or non-positive LTP: a 0.00 tick
+            # corrupts live candles (L=0, C=0), BUY/SELL marks, indicators, and
+            # Order Flow footprints.
+            ltp_val = market_data.get("ltp")
+            if not isinstance(ltp_val, (int, float)) or isinstance(ltp_val, bool) or ltp_val <= 0:
+                self.logger.debug(
+                    f"Dropping {mode_str} tick with non-positive LTP for {exchange}:{symbol}: {market_data}"
+                )
+                return
+
             # Add metadata
             market_data.update(
                 {
@@ -660,24 +670,43 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
         with self.lock:
             cached = self.last_values.get(cache_key, {}).copy()
 
+        def _positive(val: Any) -> Any:
+            if val is None or isinstance(val, bool):
+                return 0
+            try:
+                return val if float(val) > 0 else 0
+            except (TypeError, ValueError):
+                return 0
+
         def get_value(key: str, default=0):
             """Get new value if non-zero, otherwise return cached value"""
             new_val = data.get(key, 0)
-            if new_val != 0:
+            if new_val is not None and not isinstance(new_val, bool) and new_val != 0:
                 return new_val
             return cached.get(key, default)
 
+        # INDstocks WebSocket quote packets carry the live traded price under
+        # `close` (with no `ltp` key), whereas ltp packets carry `ltp`.
+        raw_ltp = (
+            _positive(data.get("ltp"))
+            or _positive(data.get("live_price"))
+            or _positive(data.get("last_price"))
+            or (_positive(data.get("close")) if mode == "quote" else 0)
+        )
+        resolved_ltp = raw_ltp if raw_ltp != 0 else cached.get("ltp", 0)
+
         if mode == "ltp":
-            result = {"ltp": get_value("ltp"), "ltt": timestamp}
+            result = {"ltp": resolved_ltp, "ltt": timestamp}
         elif mode == "quote":
             result = {
-                "ltp": get_value("ltp"),
+                "ltp": resolved_ltp,
                 "ltt": timestamp,
                 "open": get_value("open"),
                 "high": get_value("high"),
                 "low": get_value("low"),
                 "close": get_value("close"),
                 "volume": get_value("volume"),
+                "ltq": get_value("ltq"),
                 "bid_price": get_value("bid_price"),
                 "bid_qty": get_value("bid_qty"),
                 "ask_price": get_value("ask_price"),
@@ -695,7 +724,7 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 if cache_key not in self.last_values:
                     self.last_values[cache_key] = {}
                 for key, val in result.items():
-                    if val != 0 and key != "ltt":
+                    if val is not None and val != 0 and key != "ltt":
                         self.last_values[cache_key][key] = val
 
         return result

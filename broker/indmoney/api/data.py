@@ -989,14 +989,27 @@ class BrokerData:
                             if isinstance(candle, dict) and "ts" in candle:
                                 # Note: API doc says milliseconds, but actual data is in seconds
                                 timestamp_seconds = int(candle.get("ts", 0))
+                                o_val = float(candle.get("o", 0))
+                                h_val = float(candle.get("h", 0))
+                                l_val = float(candle.get("l", 0))
+                                c_val = float(candle.get("c", 0))
+                                if (
+                                    timestamp_seconds <= 0
+                                    or o_val <= 0
+                                    or h_val <= 0
+                                    or l_val <= 0
+                                    or c_val <= 0
+                                    or h_val < l_val
+                                ):
+                                    continue
 
                                 chunk_candles.append(
                                     {
                                         "timestamp": timestamp_seconds,
-                                        "open": float(candle.get("o", 0)),
-                                        "high": float(candle.get("h", 0)),
-                                        "low": float(candle.get("l", 0)),
-                                        "close": float(candle.get("c", 0)),
+                                        "open": o_val,
+                                        "high": h_val,
+                                        "low": l_val,
+                                        "close": c_val,
                                         "volume": int(candle.get("v", 0)),
                                         "oi": 0,  # Open interest not available in Indmoney historical data
                                     }
@@ -1005,14 +1018,27 @@ class BrokerData:
                             elif isinstance(candle, list) and len(candle) >= 6:
                                 # Convert timestamp from milliseconds to seconds
                                 timestamp_seconds = int(candle[0] / 1000)
+                                o_val = float(candle[1])
+                                h_val = float(candle[2])
+                                l_val = float(candle[3])
+                                c_val = float(candle[4])
+                                if (
+                                    timestamp_seconds <= 0
+                                    or o_val <= 0
+                                    or h_val <= 0
+                                    or l_val <= 0
+                                    or c_val <= 0
+                                    or h_val < l_val
+                                ):
+                                    continue
 
                                 chunk_candles.append(
                                     {
                                         "timestamp": timestamp_seconds,
-                                        "open": float(candle[1]),
-                                        "high": float(candle[2]),
-                                        "low": float(candle[3]),
-                                        "close": float(candle[4]),
+                                        "open": o_val,
+                                        "high": h_val,
+                                        "low": l_val,
+                                        "close": c_val,
                                         "volume": int(candle[5]) if candle[5] else 0,
                                         "oi": 0,  # Open interest not available in Indmoney historical data
                                     }

@@ -198,7 +198,12 @@ class OrderFlowTickRecorder:
         if not self.enabled or not symbol or not exchange or not isinstance(data, dict):
             return False
 
-        ltp = _positive_float(data.get("ltp") or data.get("last_price"))
+        ltp = _positive_float(
+            data.get("ltp")
+            or data.get("last_price")
+            or data.get("live_price")
+            or (data.get("close") if mode == 2 else None)
+        )
         if ltp is None:
             return False
 

@@ -202,3 +202,86 @@ def test_orderflow_service_auth_and_response_shape(tmp_path):
             assert body["data"]["ticks"][0][1:] == [650.0, 25, 1]
     finally:
         rec.close()
+
+
+def test_indmoney_quote_mode_resolves_ltp_from_close_and_drops_zero_ltp(tmp_path):
+    """INDstocks WebSocket quote packets carry live price in `close` (no `ltp` key).
+    Adapter must populate `ltp` from `close`, never publish 0.00 LTP, and tick recorder
+    must capture real volume deltas cleanly."""
+    import websocket_proxy  # noqa: F401  (avoid circular import order)
+    from broker.indmoney.streaming.indmoney_adapter import IndmoneyWebSocketAdapter
+
+    adapter = IndmoneyWebSocketAdapter()
+    published = []
+    adapter.publish_market_data = lambda topic, data: published.append((topic, data))
+    adapter.subscriptions = {
+        "ANTELOPUS_NSE_2": {
+            "symbol": "ANTELOPUS",
+            "exchange": "NSE",
+            "token": "13598",
+            "instrument_token": "NSE:13598",
+            "mode": 2,
+        }
+    }
+
+    # 1. Realistic INDstocks quote frame (live price in `close`, no `ltp` key)
+    adapter._on_data(
+        None,
+        {
+            "mode": "quote",
+            "instrument": "13598",
+            "timestamp": 1795586846420,
+            "data": {"open": 815, "high": 826, "low": 778.3, "close": 781.25, "volume": 68564},
+        },
+    )
+    assert len(published) == 1
+    topic, payload = published[0]
+    assert topic == "NSE_ANTELOPUS_QUOTE"
+    assert payload["ltp"] == 781.25
+    assert payload["volume"] == 68564
+
+    # 2. Second quote tick with updated live price & incremented volume
+    adapter._on_data(
+        None,
+        {
+            "mode": "quote",
+            "instrument": "13598",
+            "timestamp": 1795586847821,
+            "data": {"open": 815, "high": 826, "low": 778.3, "close": 781.50, "volume": 68814},
+        },
+    )
+    assert len(published) == 2
+    assert published[1][1]["ltp"] == 781.50
+
+    # 3. Recorder captures exact 250-share aggressive buy print from the two frames
+    rec = _make_recorder(tmp_path)
+    now = int(time.time()) - 10
+    try:
+        assert rec.record_market_data("ANTELOPUS", "NSE", 2, published[0][1], now_sec=now) is False
+        assert rec.record_market_data("ANTELOPUS", "NSE", 2, published[1][1], now_sec=now + 1) is True
+        ticks = rec.query_ticks("ANTELOPUS", "NSE")
+        assert len(ticks) == 1
+        assert ticks[0][1:] == [781.50, 250, 1]
+    finally:
+        rec.close()
+
+    # 4. Fresh symbol with zero/empty quote must be dropped (never publish ltp=0)
+    adapter.subscriptions["ZERO_NSE_2"] = {
+        "symbol": "ZERO",
+        "exchange": "NSE",
+        "token": "99999",
+        "instrument_token": "NSE:99999",
+        "mode": 2,
+    }
+    before = len(published)
+    adapter._on_data(
+        None,
+        {
+            "mode": "quote",
+            "instrument": "99999",
+            "timestamp": 1795586849000,
+            "data": {"open": 0, "high": 0, "low": 0, "close": 0, "volume": 0},
+        },
+    )
+    assert len(published) == before
+

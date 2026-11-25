@@ -1155,14 +1155,26 @@ export function autoOrderFlowRowTicks(
   let low = Number.POSITIVE_INFINITY
   let high = Number.NEGATIVE_INFINITY
   for (const bar of recent) {
-    if (Number.isFinite(bar.low)) low = Math.min(low, bar.low)
-    if (Number.isFinite(bar.high)) high = Math.max(high, bar.high)
+    if (
+      Number.isFinite(bar.low) &&
+      Number.isFinite(bar.high) &&
+      bar.low > 0 &&
+      bar.high >= bar.low
+    ) {
+      low = Math.min(low, bar.low)
+      high = Math.max(high, bar.high)
+    }
   }
   const windowSpan = Number.isFinite(low) && Number.isFinite(high) ? Math.max(0, high - low) : 0
 
   const spans: number[] = []
   for (const bar of bars.slice(-24)) {
-    if (Number.isFinite(bar.high) && Number.isFinite(bar.low) && bar.high >= bar.low) {
+    if (
+      Number.isFinite(bar.high) &&
+      Number.isFinite(bar.low) &&
+      bar.low > 0 &&
+      bar.high >= bar.low
+    ) {
       const span = bar.high - bar.low
       if (span > 0) spans.push(span)
     }
@@ -1278,6 +1290,7 @@ function buildHistoricalFootprintBar(bar: Bar, rowSize: number): FootprintBar | 
     !(rowSize > 0) ||
     !Number.isFinite(rowSize) ||
     ![bar.time, bar.open, bar.high, bar.low, bar.close].every(Number.isFinite) ||
+    !(bar.open > 0 && bar.high > 0 && bar.low > 0 && bar.close > 0) ||
     bar.high < bar.low ||
     !(typeof bar.volume === 'number' && Number.isFinite(bar.volume) && bar.volume > 0)
   ) {
@@ -1444,15 +1457,29 @@ class OrderFlowChartProfile implements ChartProfile {
     for (const bar of this.sourceBars) {
       const live = liveByTime.get(bar.time)
       if (live) {
+        const barValid =
+          Number.isFinite(bar.open) &&
+          Number.isFinite(bar.high) &&
+          Number.isFinite(bar.low) &&
+          Number.isFinite(bar.close) &&
+          bar.open > 0 &&
+          bar.high > 0 &&
+          bar.low > 0 &&
+          bar.close > 0 &&
+          bar.high >= bar.low
         // Preserve the candle's full OHLC wick envelope when a live feed starts
         // mid-bar, while keeping the live bar's real recorded cells intact.
-        merged.push({
-          ...live,
-          open: bar.open,
-          high: Math.max(bar.high, live.high ?? bar.high),
-          low: Math.min(bar.low, live.low ?? bar.low),
-          close: live.close ?? bar.close,
-        })
+        merged.push(
+          barValid
+            ? {
+                ...live,
+                open: bar.open,
+                high: Math.max(bar.high, live.high ?? bar.high),
+                low: Math.min(bar.low, live.low ?? bar.low),
+                close: live.close ?? bar.close,
+              }
+            : live
+        )
         liveByTime.delete(bar.time)
       } else {
         const fp = this.historicalBar(bar, rowSize)

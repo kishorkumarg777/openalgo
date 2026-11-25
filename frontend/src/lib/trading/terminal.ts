@@ -6581,6 +6581,7 @@ export class TradingTerminal {
     timeSec?: number
   }) {
     if (!this.sym || (e.symbol && e.symbol !== this.sym.symbol)) return
+    if (!(typeof e.ltp === 'number' && Number.isFinite(e.ltp) && e.ltp > 0)) return
     this.lastLtp = e.ltp
     this.cb.onLtp(e.ltp)
     const tickTime = e.timeSec || nowSec()
@@ -6703,6 +6704,7 @@ export class TradingTerminal {
       this.offDepth = null
     }
     this.offLtp = this.ws.onLtp((e: LtpEvent) => {
+      if (!(typeof e.ltp === 'number' && Number.isFinite(e.ltp) && e.ltp > 0)) return
       this.cb.onWsState('live')
       this.stopLtpFallback()
       this.onTick(e)

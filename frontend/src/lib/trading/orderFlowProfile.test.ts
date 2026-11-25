@@ -256,4 +256,25 @@ describe('order flow profile', () => {
     // Full candle OHLC envelope preserved even though live feed only captured 102.
     expect(fp._bars[0]).toMatchObject({ open: 99, high: 105, low: 98, close: 102 })
   })
+
+  it('ignores corrupted zero-low / zero-close bars in auto row sizing and footprint reconstruction', () => {
+    const cleanBars = [
+      { time: 0, open: 840, high: 860, low: 818, close: 823, volume: 66_455 },
+      { time: 14400, open: 823, high: 847, low: 822, close: 830, volume: 32_900 },
+      { time: 28800, open: 822, high: 825, low: 815, close: 820, volume: 17_894 },
+    ]
+    const corruptBar = { time: 43200, open: 815, high: 826, low: 0, close: 0, volume: 54_290 }
+
+    // Adding a corrupt zero-low bar must NOT blow up auto row ticks from ~₹2 to ₹40.
+    const cleanTicks = autoOrderFlowRowTicks(cleanBars, 0.05)
+    const withCorruptTicks = autoOrderFlowRowTicks([...cleanBars, corruptBar], 0.05)
+    expect(withCorruptTicks).toBe(cleanTicks)
+
+    const profile = createChartProfile('order-flow', settings(), { ...context, tickSize: 0.05 })
+    profile.attached?.({ requestUpdate: vi.fn() })
+    profile.setBars([...cleanBars, corruptBar])
+    const fp = (profile as unknown as { footprint: { _bars: { time: number }[] } }).footprint
+    // The corrupted 0.00 bar is skipped rather than filling footprints down to 0.00.
+    expect(fp._bars.map((b) => b.time)).toEqual([0, 14400, 28800])
+  })
 })
