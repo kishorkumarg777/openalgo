@@ -2934,7 +2934,7 @@ wheels = [
 
 [[package]]
 name = "openalgo"
-version = "2.0.5"
+version = "2.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -2942,18 +2942,18 @@ dependencies = [
     { name = "pandas" },
     { name = "websocket-client" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/79/11/924146f63ef8e1f67b05377fb224c141bd96da5bbe567d96dd6b6af62f62/openalgo-2.0.5.tar.gz", hash = "sha256:675d6eb592ef105e4647166d0abd30bb95d668cf7353403e31436b7ef6ced2d6", size = 186521, upload-time = "2026-09-11T06:41:33.581Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/16/20/5a63f8315e0e78e69bad507acc00cf372eaad1fb89fef59b9ea1c469de4c/openalgo-2.4.1.tar.gz", hash = "sha256:b73bb952177bae005275350467fd4e5537b4d33a84ceb9c0e60d1591e4501b0d", size = 2248877, upload-time = "2026-11-23T21:37:10.901Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d9/78/7be6d35e12c3951e14b93dbe231fca03bf6279edac8fe503a4b690b0ac18/openalgo-2.0.5-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:c20b01e3a7413ed62b7c5d8342ecc6c01c200abf8cf13f8394e693e1ae84fc28", size = 466505, upload-time = "2026-09-11T06:41:25.172Z" },
-    { url = "https://files.pythonhosted.org/packages/d0/3f/d36e1a868d4396cbcac5225702f05a49f29c8b83760abcb89c5436efebdd/openalgo-2.0.5-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:70303029bfccb31be58cae5036292a33eeeaae506654955586b432fab424fbe0", size = 448026, upload-time = "2026-09-11T06:41:27.322Z" },
-    { url = "https://files.pythonhosted.org/packages/6f/d5/f758948d0e7346e446c00a4970014bf40bf288f24385a8eb08170e62e1df/openalgo-2.0.5-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:62458dd7d583640bd39e8a27062837d696e647bdeb262596f71abbfabbc4ba62", size = 460796, upload-time = "2026-09-11T06:41:29.05Z" },
-    { url = "https://files.pythonhosted.org/packages/bb/4e/09a829e646165728bec27c007df86294003e9e249245e2cc203c5b8a4c6c/openalgo-2.0.5-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:299b8c8745519aca2a8d7795b68b6d386d54f080aa0370a928117c3b634f63ba", size = 482003, upload-time = "2026-09-11T06:41:30.572Z" },
-    { url = "https://files.pythonhosted.org/packages/7f/b6/c9ae5eba70ace27524ac02a7d0054d5cea407a4a9af12cfacfa2d83f6c05/openalgo-2.0.5-cp39-abi3-win_amd64.whl", hash = "sha256:1fe20400e59bfaeea15877786fc5cc177b8fa8599167fbea69a3b801ad05b896", size = 424334, upload-time = "2026-09-11T06:41:32.254Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/c8/7c07834c678dde395eedfa87e8cb79cb3f83a71d8330d5b6cbbea4022cb7/openalgo-2.4.1-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:7cff7cba7e2ff67f6d3d023daeaaee366e47379b418c394df65077375445de93", size = 2854589, upload-time = "2026-11-23T21:37:02.203Z" },
+    { url = "https://files.pythonhosted.org/packages/54/fc/d206b55edaeba4770afe58a0c42749f324475ecf5cb058b62c99d41ba4ec/openalgo-2.4.1-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:19d81f1d899c4b5924343b6ed184dd9bef12dc71001246202c405f38ff49270f", size = 2754449, upload-time = "2026-11-23T21:37:04.074Z" },
+    { url = "https://files.pythonhosted.org/packages/03/e9/a4a146ad14279383314757796154a549d6be1f74e09d3e1d89938ff0d0ff/openalgo-2.4.1-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:629e07f5be4ac2098ccf62276057eb37828aa93ba8edae047e2c959415db17dc", size = 2775566, upload-time = "2026-11-23T21:37:06.123Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/a8/951071bfdea38d1984a9827d0e7cf15aba3beb1df2e6cde02ebee5fa6fee/openalgo-2.4.1-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:4be036e9215f6ebffc619fa1230c7e31949b0c91adadcabaa76993424134e740", size = 2868486, upload-time = "2026-11-23T21:37:07.697Z" },
+    { url = "https://files.pythonhosted.org/packages/49/8b/187194189fee810ca92db90f6594cb283acb6a89e8e3c58b96b579058947/openalgo-2.4.1-cp39-abi3-win_amd64.whl", hash = "sha256:ab196d46ac902f9b2132ed9a7807055916df98d4bd5caf238b04293fbd778171", size = 2913094, upload-time = "2026-11-23T21:37:09.113Z" },
 ]
 
 [[package]]
 name = "openalgoui"
-version = "2.0.3.4"
+version = "2.0.3.6"
 source = { editable = "." }
 dependencies = [
     { name = "agno" },
@@ -3213,9 +3213,9 @@ requires-dist = [
     { name = "nbformat", specifier = "==5.11.1" },
     { name = "nest-asyncio", specifier = "==1.6.0" },
     { name = "numpy", specifier = "==2.4.4" },
-    { name = "openalgo", specifier = "==2.0.5" },
+    { name = "openalgo", specifier = "==2.4.1" },
     { name = "opengreeks", specifier = ">=0.2.0" },
-    { name = "openscript", specifier = "==0.8.1" },
+    { name = "openscript", specifier = "==0.9.0" },
     { name = "openstatz", specifier = "==0.4.1" },
     { name = "ordered-set", specifier = "==4.1.0" },
     { name = "orjson", specifier = "==3.12.0" },
@@ -3326,11 +3326,11 @@ wheels = [
 
 [[package]]
 name = "openscript"
-version = "0.8.1"
+version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/98/4f/6e35d0c81ac7810011a2b9f76b9bdefae7d6aab01a994c72bd285a4f8802/openscript-0.8.1.tar.gz", hash = "sha256:3b4366699eda1f5cb32debca1b1edd706a276cd66903bed35187f78b76e2af0c", size = 417778, upload-time = "2026-10-01T07:14:36.165Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fc/fc/2a610a3efcebacc64174ab771eb525ed5dee47f3d38dd6313fbb9326f991/openscript-0.9.0.tar.gz", hash = "sha256:9f95f20cd6920960f9a1bec906a531f108948e37fd9e02dc1806fee7e3e8d574", size = 421330, upload-time = "2026-11-26T04:38:48.197Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a7/0a/6c21b8a787fa11595cfb5d8197a1a2c254898064be6e3cf4a7ce9a914ee6/openscript-0.8.1-py3-none-any.whl", hash = "sha256:3e81cb8af04ee1408ddfee881a2cd986dc302bc191de3d847c0f80eb0260ddb6", size = 300569, upload-time = "2026-10-01T07:14:34.788Z" },
+    { url = "https://files.pythonhosted.org/packages/69/57/c1175e1ef996c07454a930a952c5edbc8685f369ca463339d1c92af93671/openscript-0.9.0-py3-none-any.whl", hash = "sha256:47b7d113757457b0315083c6008bb0d6badf9fd7c3ceffbc3b8857acb0b123b9", size = 302566, upload-time = "2026-11-26T04:38:46.791Z" },
 ]
 
 [[package]]

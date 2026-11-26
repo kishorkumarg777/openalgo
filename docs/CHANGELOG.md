@@ -6,6 +6,296 @@ Each release adds a stanza here summarising what changed and who contributed.
 The full notes for a release, with commit SHAs and the reasoning behind each
 fix, live in [docs/releases](releases/).
 
+## [2.0.3.6] - 2026-11-26
+
+### OpenScript Timeframes and Sandbox Charges Release
+
+22 commits since 2.0.3.5, excluding automated frontend build commits and
+including this release. Full notes:
+[version-2.0.3.6-released.md](releases/version-2.0.3.6-released.md).
+Run `cd upgrade && uv run migrate_all.py`: it adds the sandbox charge columns
+(see Upgrade notes below).
+
+### Highlights
+
+- Sandbox fills pay brokerage and statutory charges, with a brokerage plan per
+  segment, a calculator and a charges API (#2496).
+- OpenScript reads any minute timeframe on `/trading` and in backtests, with
+  intraday candles counted from the session open (`openalgo-script` and
+  `openscript` 0.9.0).
+- The pinned OpenAlgo Python SDK moves from 2.3.0 to 2.4.1.
+- openalgo-charts 2.7.5 with Pivot Points Standard on every chart.
+- The watchlist shows the price change by default (#2276).
+- Weekly and monthly charts load for brokers without native weekly or monthly
+  history (#2443).
+- Broker fixes for Flattrade, 5paisa XTS, Zerodha and SL-M stop orders on
+  Shoonya, Flattrade and Firstock.
+
+### Added
+
+- OpenScript studies and strategies on `/trading` read any minute timeframe,
+  coarser or finer than the chart: fifteen, twenty five and three minutes on a
+  ten minute chart, where only whole multiples (twenty, thirty, forty) were
+  allowed before. `openalgo-script` 0.9.0 builds those from finer bars the
+  terminal's bars provider serves. The script settings dialog now offers every
+  intraday interval on an intraday chart. Backtests fetch the finer bars a
+  strategy needs before the run, and a backtest can now read another
+  instrument with `req.symbol`. A strategy deployed to run on the server still
+  reads whole multiples only, and says so when it starts.
+
+### Changed
+
+- OpenScript intraday timeframe reads now start at the session open. A 60
+  minute `req.timeframe` read on NSE ran 09:15 to 09:30 and then 09:30 to 10:30;
+  it now runs 09:15 to 10:15, as the broker's own hourly candles do, and so do
+  30 and 10 minute reads. Studies using those reads redraw after the update.
+
+- Sandbox trades now pay brokerage and statutory charges. Each fill is charged
+  brokerage under your own plan, plus STT or CTT, exchange transaction charges,
+  SEBI fees, stamp duty and GST at the published rates. The charge is taken from
+  the available balance when the order fills, so sandbox funds and results will
+  be lower than before for the same trades. P&L is still shown before charges,
+  with the charges beside it.
+- `/sandbox/commissions`: set the brokerage for each segment (an amount per
+  executed order, a percentage of the trade value, or the lower of the two) and
+  switch charges on or off. Defaults: delivery 20 or 2.5%, intraday 20 or 0.1%,
+  futures 20 or 0.03%, options 20 per order. The same page has a transaction
+  cost report by trade, segment and day, with a CSV export.
+- `/sandbox/calculator`: a brokerage calculator. Enter a buy price, a sell price
+  and a quantity for any segment and exchange, and see every charge, the points
+  to breakeven and the net P&L. Its lines are the ones a published brokerage
+  calculator shows for the same trade: 117 trades were read from one and are
+  kept as a test (103 match on every line, 8 are one paisa apart on an exact
+  half paisa, and 6 are NSE currency futures, where that calculator leaves the
+  investor protection levy out of its own total).
+- A broker on the Indian exchanges is shown the Indian plan and calculator, and
+  a crypto venue is shown the crypto ones (as a venue fee and a fee calculator).
+  The two are never shown together.
+- `POST /api/v1/charges`: the charges for one order before it is placed, laid out
+  as total, brokerage, taxes and other charges. It is in the API playground and
+  documented under `docs/api/account-services/charges.md`.
+- `/sandbox/mypnl` shows today's and lifetime charges and the net figures, and a
+  charges column on the day-wise and trade tables. The day-wise and trades CSV
+  exports gain charges columns at the end.
+- **Pivot Points Standard on every chart.** `/trading`, Historify and the
+  strategy charts now use openalgo-charts 2.7.5 (from 2.7.3). Its 2.7.4
+  release adds one study and takes the built-in indicators to 113. The
+  study draws the pivot with up to five support and resistance pairs,
+  worked out from the last finished period. Choose the type (Traditional,
+  Fibonacci, Woodie, Classic, DeMark or Camarilla) and the period: daily,
+  weekly, monthly, quarterly, yearly, or
+  Auto, which takes the previous session on a chart of 15 minutes or less,
+  the previous week on other intraday charts, the previous month on a daily
+  chart and the previous year above that. The fourth and fifth pairs are
+  switched off to begin with, because they sit far from price. The levels
+  come from finished periods only, so they do not move during the session,
+  and nothing is drawn until the chart has loaded two full periods. The AI
+  agent can add the study to a chart as well.
+
+### Upgrade notes
+
+- Charges are on after the upgrade, for new and existing installs. To keep the
+  old behaviour, switch them off on `/sandbox/commissions`.
+- Charges apply from the first sandbox trade after the upgrade. Trades already
+  made are not charged, and no balance is changed by the upgrade itself.
+- Run `cd upgrade && uv run migrate_all.py` as usual. It adds the charge columns
+  to the sandbox database and the default brokerage plan. An install that only
+  restarts gets the same columns at startup.
+- A sandbox balance can now go below zero: a trade that fills with too little
+  cash left to cover its charges still pays them, as a broker's ledger would.
+- Resetting the sandbox from `/sandbox` also puts the brokerage plan back to its
+  defaults.
+- Not charged: depository (DP) charges on a delivery sell; STT on an option that
+  is exercised at expiry (a position settled at expiry pays nothing); a delivery
+  buy and sell on the same day pays delivery rates on both sides; agricultural
+  commodities and NCDEX use the MCX rates for other commodities.
+- Rounding follows a contract note: STT and stamp duty to the nearest rupee,
+  CTT and every other line to the paisa. Each trade is rounded on its own, where
+  a contract note rounds STT and stamp duty once on the day's total, so a day of
+  many small trades can differ from it by a rupee or two.
+- Crypto is charged nothing by default. Every crypto value is zero until a venue
+  fee is entered on `/sandbox/commissions`, and nothing is added to that fee.
+  One fee applies to every executed order: maker and taker rates are not told
+  apart.
+
+### Changed
+
+- The timezone list on `/trading`, in the clock menu on the bottom bar and in
+  Chart settings, grows from 14 zones to 30. Every zone listed before is still
+  there, and the clock menu still finds any other zone by name.
+- A custom chart indicator in `strategies/indicators/` whose id is
+  `pivot-points` now replaces the new built-in study on every chart, as any
+  custom id that matches a built-in does. Rename its id if that is not what
+  you want.
+- Not part of this update: openalgo-charts 2.7.4 also adds, to its own
+  packaged menus and toolbar, moving a study to another pane from its
+  right-click menu, a full screen button and a switch between regular and
+  extended hours. OpenAlgo's charts draw their own menus and toolbar, so
+  these do not appear. Full screen is already on the `/trading` toolbar, no
+  broker feed here serves extended hours as a separate series, and moving a
+  study between panes from the menu is not available yet.
+- On the Historify and strategy charts, Chart settings and an indicator's
+  settings can now be moved: drag the form by its title bar to see the
+  candles or the study behind it. It cannot be dragged out of reach, and it
+  opens in the centre again the next time. This comes with openalgo-charts
+  2.7.5. The settings forms on `/trading` are OpenAlgo's own: they still open
+  over the middle of the chart and do not move.
+- Nothing else in openalgo-charts 2.7.5 changes a chart here. Its other two
+  fixes are a chart that now keeps the right-hand gap its host page asked
+  for (no chart in OpenAlgo asks for one, so every chart opens and resets to
+  the same view as before) and a Reset view row on the library's own
+  right-click menu (OpenAlgo's menus already have Reset chart view).
+- The watchlist on `/trading` now opens on four columns: Symbol, Last, Chg and
+  Chg%. Chg is the move from the previous close in price. It was an optional
+  column before, switched off, and easy to miss. A browser that still has the
+  earlier two columns gets Chg added once; a selection you made yourself is
+  left as it was. To hide it, open **Customise columns** (the three dots at
+  the top of the watchlist); that choice is remembered. (#2276)
+- Watchlist prices and moves are shown to the paisa at every size. A price
+  above a thousand used to lose a decimal, so 25,349.65 read 25,349.7 and a
+  move of -2,049.85 read -2,049.8. Currency contracts on CDS and BCD are shown
+  to four decimals. Not changed: an instrument quoted finer than two decimals
+  on any other exchange (some crypto contracts) is still shown to two, so its
+  Chg can read 0.00 while its Chg% shows the move.
+- The watchlist opens a little wider (392 px, it was 340) to hold the extra
+  column, and its narrowest width with the four columns is 342 px. A width you
+  have already dragged it to is kept, unless it is below that.
+- The pinned OpenAlgo Python SDK moves from 2.3.0 to 2.4.1. A Python strategy
+  can now run several strategies on one account, in a backtest or a live
+  session, including two on one symbol. It also adds optional daily limits
+  (trades per day, profit target, order value), an audit record of every live
+  order and custom tearsheets. The SDK's own dependencies are unchanged.
+- Backtest figures for equity change with SDK 2.4.1. A backtest, and the cost
+  figures of a `bt.live` session, now charge the standard brokerage unless you
+  choose another: delivery 2.5 percent of the order value or Rs 20 per
+  executed order, whichever is lower (it was free), and intraday 0.1 percent
+  or Rs 20, whichever is lower (it was 0.03 percent or Rs 20). Futures and
+  options brokerage is as before. This is the brokerage the sandbox plan above
+  starts with, so a backtest and a sandbox run now begin from the same plan.
+  A delivery order of Rs 800 or more pays Rs 23.60 more (Rs 20 and the GST on
+  it), and an intraday order below about Rs 66,667 pays more as well. The
+  trades a backtest takes do not change. The earlier brokerage is still in the
+  SDK as a named preset: the SDK's 2.4.1 changelog gives the argument that
+  selects it.
+- New SDK methods: `client.charges(...)` prices one order through the Charges
+  API above before it is placed, and `client.discord(message)` and
+  `client.slack(message)` send an alert through the webhook saved on
+  `/discord` or `/slack`, while that channel is switched on at `/alerts`.
+- A backtest can now cost MCX options on non-agri commodities and NSE currency
+  futures and options, and the SDK's cost helpers take a quantity in lots.
+  Currency derivatives are backtest-only for now: a `bt.live` session refuses
+  a strategy on CDS or BCD when it starts.
+- Upgrade while no `bt.live` session is running. A live session that 2.3.0
+  saved earlier the same day cannot be resumed by 2.4.0 or later, so start it
+  fresh after the upgrade. A strategy class that holds a nested ABC, Protocol
+  or Flag gets a new version id with SDK 2.4.1, so a restart on the day of
+  the upgrade reports a version change for it.
+- Now refused in a live session: a resting reversal order, and a resting
+  order against a position its stop already closes. Both are stopped before
+  they reach the broker, where both could fill. Use `target=` on the entry, or
+  MARKET orders. A trade closed by the account's daily loss limit now records
+  the exit reason `account_loss_limit` instead of `manual`.
+
+### Fixed
+
+- An OpenScript backtest of a script that reads a finer interval the chart's
+  divides, such as `"15m"` on an hourly chart or `"1m"` on a 5 minute one, now
+  fetches those bars; the read was absent on every bar. The same read drawn on
+  a chart still shows nothing until the next `openalgo-script` release: write
+  the minutes as a bare number (`"15"`) until then, which is fetched.
+- An instrument sitting on its previous close is no longer shown as a gain in
+  the `/trading` watchlist. It read `+0.00%` in green. It now reads `0.00` and
+  `0.00%` with no sign and no colour.
+- Adding a column to the watchlist no longer cuts an instrument's name short
+  beside a whole exchange tag (NIFTY read "NI..." next to NSE_INDEX). The name
+  now gets the room first and the exchange shows where both fit. Hold the
+  pointer over a row for the full name and exchange.
+- On a watchlist long enough to scroll, each column label now sits over its
+  figures. The labels were offset to the right by the width of the scrollbar.
+- A crypto contract looked up before the symbol cache had loaded was valued at
+  1000 times its worth, because that lookup dropped the contract multiplier.
+  Sandbox P&L for such a contract was wrong by the same factor. The multiplier
+  is now carried on that path as it is on the cached one.
+- The AI agent's indicator tools and its chart tools load again. Since the
+  move to SDK 2.3.0 in 2.0.3.5, both were skipped at startup, so the agent
+  could neither compute an indicator nor read or draw on the chart. The SDK
+  had added the Relative Volatility Index (`ta.rvi_volatility`, from SDK
+  2.1.0) and the agent's indicator catalogue did not list it. The catalogue
+  now holds all 128 indicators, the new one included. `ta.rvi` is still the
+  Relative Vigor Index.
+- The indicator docs called the Relative Volatility Index as `ta.rvi(close)`,
+  which raises an error. They now show `ta.rvi_volatility(close)`.
+
+### Broker fixes
+
+- Flattrade: order updates stream from the market data socket instead of
+  polling, and a non-JSON order book reply after the daily rollover now answers
+  Not_Ok instead of raising (#2507, #2386). Pre-open history bars before the
+  calendar's session open are dropped, which had broken older history on
+  Muhurat day (#2482).
+- 5paisa XTS: open positions and trade book fills are read as the XTS v2 docs
+  describe them, so a smart-order exit no longer places a new order; the feed
+  and history share one market data session, so history no longer fails with
+  "Invalid Token" (#2504, #2484); history requests no longer leave gaps between
+  chunks (#2490).
+- Zerodha: holdings count pledged and T1 shares (#2503), and full-mode ticks
+  read open interest from its documented bytes (#2494, #2491).
+- Shoonya, Flattrade and Firstock: an SL-M order, sent as a stop-limit, is
+  priced off its trigger rather than the last price (#2495).
+- Weekly and monthly charts on `/trading` no longer time out for brokers
+  without native weekly or monthly history (#2443, #2384).
+
+### Dependencies
+
+- `openalgo` 2.3.0 to 2.4.1.
+- `openscript` 0.8.1 to 0.9.0.
+- Frontend: `openalgo-charts` 2.7.3 to 2.7.5, `openalgo-script` 0.8.1 to 0.9.0.
+
+### Contributors
+
+- **@marketcalls** - sandbox charges (#2496, #2497), OpenScript 0.9.0, the
+  watchlist (#2276), openalgo-charts and SDK updates, and the release.
+- **@Kalaiviswa** - Flattrade, 5paisa XTS, Zerodha and SL-M fixes (#2507,
+  #2482, #2504, #2503, #2494, #2495), weekly and monthly charts (#2443) and the
+  broker skill refresh (#2483).
+- **@nikitabhagat2307-prog (Nikita Bhagat)** - 5paisa XTS history chunk gaps
+  (#2490).
+
+## [2.0.3.5] - 2026-11-20
+
+### Python SDK 2.3.0 Release
+
+25 commits since 2.0.3.4, excluding automated frontend build commits and
+including this release. Full notes:
+[version-2.0.3.5-released.md](releases/version-2.0.3.5-released.md).
+No migration is needed.
+
+### Highlights
+
+- The pinned OpenAlgo Python SDK moves from 2.0.5 to 2.3.0.
+- The Pocketful plugin is rebuilt on its new API (#2467).
+- Order update streams for Tradejini, Groww and Sahi (#2477, #2474).
+- AI agent: web fetch, prompt caching for Claude models and search that falls
+  through the other keyed providers.
+- Sandbox feed subscribes no longer sit on the order path (#2192).
+- Broker fixes for Flattrade, Nuvama, Tradesmart, Aliceblue, XTS, Wisdom and
+  iBulls.
+
+### Dependencies
+
+- `openalgo` 2.0.5 to 2.3.0.
+- `litellm` to 1.110.1, with `pydantic` 2.14.3.
+
+### Contributors
+
+- **@marketcalls** - the AI agent work, the broker fixes, the dependency
+  updates and the release.
+- **@Kalaiviswa** - broker order streams and fixes (#2473 to #2480).
+- **@jackiectl2 (Tianlang (Jackie) Chen)** - WebSocket reconnect (#2277).
+- **@samadarsh (Adarsh)** - sandbox feed subscribe (#2192).
+- **@Mystery01092000 (Pranav Tomar)** - scalping partial exit P&L (#2437).
+- **@Mr-Neutr0n** - contributing guide (#2457).
+
 ## [2.0.3.4] - 2026-11-17
 
 ### Alert Channels and Nuvama Release

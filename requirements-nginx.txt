@@ -79,7 +79,7 @@ narwhals==2.25.0
 nbformat==5.11.1
 nest-asyncio==1.6.0
 numpy==2.4.4
-openalgo==2.0.5
+openalgo==2.4.1
 ordered-set==4.1.0
 orjson==3.12.0
 packaging==24.1
@@ -158,7 +158,7 @@ openstatz==0.4.1
 
 # The engine that runs a compiled OpenScript strategy on the server. Without it
 # a native install shows the OpenScript editor but cannot run a strategy.
-openscript==0.8.1
+openscript==0.9.0
 
 # The /agent module and the /trading agent side tab. They are imported only when
 # someone uses the agent, so a missing package does not stop the app starting;
