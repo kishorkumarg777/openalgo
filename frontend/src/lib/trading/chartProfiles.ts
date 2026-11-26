@@ -1558,6 +1558,8 @@ function mergeFootprintCells(base: FootprintBar, live: FootprintBar, bar: Bar, r
   }
 }
 
+const MAX_ACTIVE_FOOTPRINT_BARS = 400
+
 /**
  * Order Flow: the library's footprint, fed by the terminal's live feed for
  * real-time bars, real 1m intrabars for higher-timeframe history/mid-bar backfill,
@@ -1571,6 +1573,9 @@ class OrderFlowChartProfile implements ChartProfile {
   private sourceBars: readonly Bar[] = []
   private autoRowTicks: number | undefined
   private historicalCache = new Map<number, { key: string; fp: FootprintBar | null }>()
+  private windowStart = 0
+  private windowEnd = 0
+  private viewportRange: { from: number; to: number } | null = null
 
   constructor(settings: OrderFlowSettings, context: ChartProfileContext) {
     this.settings = settings
@@ -1621,7 +1626,7 @@ class OrderFlowChartProfile implements ChartProfile {
     return fp
   }
 
-  private sync(): void {
+  private sync(requestRedraw = true): void {
     const tickSize =
       Number.isFinite(this.context.tickSize) && this.context.tickSize >= 1e-8
         ? this.context.tickSize
@@ -1637,6 +1642,33 @@ class OrderFlowChartProfile implements ChartProfile {
     }
     const earliestTick = feed?.earliestTickTime() ?? null
 
+    // Keep Footprint.setBars() fast on deep 1m histories (1,500+ bars across 7 days)
+    // by scoping active footprint computation to the visible session window (~400 bars).
+    const totalBars = this.sourceBars.length
+    let startIdx = 0
+    let endIdx = totalBars
+    if (totalBars > MAX_ACTIVE_FOOTPRINT_BARS) {
+      if (this.viewportRange) {
+        endIdx = Math.min(totalBars, Math.max(1, Math.ceil(this.viewportRange.to) + 40))
+        startIdx = Math.max(0, Math.min(Math.floor(this.viewportRange.from) - 80, endIdx - MAX_ACTIVE_FOOTPRINT_BARS))
+      } else {
+        startIdx = Math.max(0, totalBars - MAX_ACTIVE_FOOTPRINT_BARS)
+        endIdx = totalBars
+      }
+      // Align startIdx back to the opening bar of its trading session (bounded) so
+      // session CVD resets cleanly at session open.
+      if (startIdx > 0) {
+        const zone = sessionZone(this.context)
+        const targetDay = sessionDay(this.sourceBars[startIdx].time, zone)
+        const floorIdx = Math.max(0, startIdx - 380)
+        while (startIdx > floorIdx && sessionDay(this.sourceBars[startIdx - 1].time, zone) === targetDay) {
+          startIdx--
+        }
+      }
+    }
+    this.windowStart = startIdx
+    this.windowEnd = endIdx
+
     // Group any available 1m intrabars by parent bar in O(N + M).
     const intrabars = this.context.intrabarBars?.() ?? []
     const intervalSec = Math.max(60, this.context.intervalSeconds || 60)
@@ -1644,7 +1676,7 @@ class OrderFlowChartProfile implements ChartProfile {
 
     const rowSize = tickSize * rowTicks
     const merged: FootprintBar[] = []
-    for (let i = 0; i < this.sourceBars.length; i++) {
+    for (let i = startIdx; i < endIdx; i++) {
       const bar = this.sourceBars[i]
       let subBars: Bar[] | undefined
       if (intrabars.length > 0 && intervalSec > 60) {
@@ -1724,12 +1756,13 @@ class OrderFlowChartProfile implements ChartProfile {
         if (fp) merged.push(fp)
       }
     }
+    const minWindowTime = startIdx < endIdx ? this.sourceBars[startIdx].time : Number.NEGATIVE_INFINITY
     for (const live of liveByTime.values()) {
-      merged.push(live)
+      if (live.time >= minWindowTime) merged.push(live)
     }
 
     this.footprint.setBars(merged)
-    this.host?.requestUpdate()
+    if (requestRedraw) this.host?.requestUpdate()
   }
 
   zOrder() {
@@ -1744,6 +1777,17 @@ class OrderFlowChartProfile implements ChartProfile {
     this.footprint.detached()
   }
   draw(ctx: CanvasRenderingContext2D, rc: PrimitiveRenderContext): void {
+    if (this.sourceBars.length > MAX_ACTIVE_FOOTPRINT_BARS) {
+      const vr = rc.timeScale.visibleRange()
+      if (Number.isFinite(vr.from) && Number.isFinite(vr.to)) {
+        this.viewportRange = vr
+        const needFrom = Math.max(0, Math.floor(vr.from))
+        const needTo = Math.min(this.sourceBars.length, Math.ceil(vr.to) + 1)
+        if (needFrom < this.windowStart || needTo > this.windowEnd) {
+          this.sync(false)
+        }
+      }
+    }
     this.footprint.draw(ctx, rc)
   }
   // The primary OHLC series owns visible-window autoscale; historical footprint

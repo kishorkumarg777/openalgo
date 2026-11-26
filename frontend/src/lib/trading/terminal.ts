@@ -1912,6 +1912,7 @@ export class TradingTerminal {
       }
     }
 
+    const prevBars = this.rawBars
     this.rawBars = next
     if (snapshot.paused || this.replayOwnsDisplay()) return
 
@@ -1919,6 +1920,37 @@ export class TradingTerminal {
     if (!this.chart || !this.price || !this.volume || this.chartDataKey !== key) {
       this.chartDataKey = key
       this.buildChart()
+    } else if (snapshot.reason === 'refresh' && !this.transformed() && prevBars.length > 0) {
+      // Avoid wholesale setData() + full indicator recomputes (e.g. LuxAlgo SMC over
+      // 1,500+ 1m bars) on background refreshes when nothing or only the latest bar moved.
+      const eq = (a: Bar, b: Bar) =>
+        a.time === b.time &&
+        a.open === b.open &&
+        a.high === b.high &&
+        a.low === b.low &&
+        a.close === b.close &&
+        (a.volume ?? 0) === (b.volume ?? 0) &&
+        (a.oi ?? 0) === (b.oi ?? 0)
+      const sameLen = prevBars.length === next.length
+      const prefixSame =
+        sameLen &&
+        prevBars.length > 0 &&
+        (() => {
+          for (let i = prevBars.length - 2; i >= 0; i--) {
+            if (!eq(prevBars[i], next[i])) return false
+          }
+          return true
+        })()
+      if (prefixSame) {
+        const lastPrev = prevBars[prevBars.length - 1]
+        const lastNext = next[next.length - 1]
+        if (!eq(lastPrev, lastNext)) {
+          if (!this.updateLiveBar(lastNext)) this.setPriceData()
+          this.refreshLegend()
+        }
+      } else {
+        this.setPriceData()
+      }
     } else {
       this.setPriceData()
       if (snapshot.reason === 'prepend') this.installComparisons()
@@ -2496,8 +2528,9 @@ export class TradingTerminal {
       onError: (error) =>
         this.toast(`Profile could not be rendered: ${this.cleanError(error)}`, 'err'),
       onWarning: (message) => this.toast(message, ''),
-      // Order Flow updates at ~60fps so live 1m footprint cells tick smoothly.
-      coalesceMs: kind === 'order-flow' ? 16 : 100,
+      // Order Flow updates at ~30fps so live 1m footprints stay smooth without
+      // saturating the main thread when heavy OpenScript indicators are active.
+      coalesceMs: kind === 'order-flow' ? 32 : 100,
     })
     this.offProfileObject =
       this.objects?.register(profileObjectProvider(kind, () => this.requestChartSettings())) ?? null
@@ -6813,22 +6846,25 @@ export class TradingTerminal {
         ? 'Quote'
         : 'Depth'
     const previous = this.liveSub
-    if (
+    const switching = Boolean(
       previous &&
-      (previous.mode !== mode ||
-        previous.symbol !== this.sym.symbol ||
-        previous.exchange !== this.sym.exchange)
-    ) {
+        (previous.mode !== mode ||
+          previous.symbol !== this.sym.symbol ||
+          previous.exchange !== this.sym.exchange)
+    )
+    this.startOrderFlowFeed(sec)
+    // Subscribe the new symbol BEFORE unsubscribing the previous one so a
+    // single-pane chart switch never momentarily drops the broker WS to 0 symbols.
+    if (mode === 'Depth') this.ws.subscribe('Depth', this.sym.symbol, this.sym.exchange, 5)
+    else this.ws.subscribe(mode, this.sym.symbol, this.sym.exchange)
+    this.liveSub = { mode, symbol: this.sym.symbol, exchange: this.sym.exchange }
+    if (switching && previous) {
       try {
         this.ws.unsubscribe(previous.mode, previous.symbol, previous.exchange)
       } catch {
         /* not subscribed */
       }
     }
-    this.startOrderFlowFeed(sec)
-    if (mode === 'Depth') this.ws.subscribe('Depth', this.sym.symbol, this.sym.exchange, 5)
-    else this.ws.subscribe(mode, this.sym.symbol, this.sym.exchange)
-    this.liveSub = { mode, symbol: this.sym.symbol, exchange: this.sym.exchange }
   }
 
   /** Snapshot of Order Flow controls, resolved row precision, and tape fidelity. */

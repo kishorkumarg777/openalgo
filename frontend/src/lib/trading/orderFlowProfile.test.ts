@@ -338,4 +338,30 @@ describe('order flow profile', () => {
     // Live flat lower-circuit print at 87.05 was classified as sell (initialSide: 'bid').
     expect(feed.bars()[0].delta).toBe(-733)
   })
+
+  it('scopes active footprint bars to the recent session window on deep 1m histories', () => {
+    const start = Date.UTC(2026, 10, 20, 3, 45) / 1000
+    // 1,600 bars (~4+ trading days of 1m history)
+    const manyBars = Array.from({ length: 1600 }, (_, i) => ({
+      time: start + i * 60,
+      open: 100 + (i % 5) * 0.1,
+      high: 100.6 + (i % 5) * 0.1,
+      low: 99.8 + (i % 5) * 0.1,
+      close: 100.2 + (i % 5) * 0.1,
+      volume: 1000,
+    }))
+    const profile = createChartProfile(
+      'order-flow',
+      { ...settings(), rowSizeMode: 'manual', ticksPerRow: 2 },
+      { ...context, tickSize: 0.05 }
+    )
+    profile.attached?.({ requestUpdate: vi.fn() })
+    profile.setBars(manyBars)
+    const fp = (profile as unknown as { footprint: { _bars: { time: number }[] } }).footprint
+    // Bounded to the recent active session window (not all 1,600 bars) while
+    // always including the latest forming bar.
+    expect(fp._bars.length).toBeLessThan(800)
+    expect(fp._bars.length).toBeGreaterThanOrEqual(400)
+    expect(fp._bars[fp._bars.length - 1].time).toBe(manyBars[manyBars.length - 1].time)
+  })
 })

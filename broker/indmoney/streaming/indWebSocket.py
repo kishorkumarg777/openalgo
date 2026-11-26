@@ -98,13 +98,6 @@ class IndWebSocket:
 
     def _on_message(self, wsapp, message):
         """Handle incoming WebSocket messages"""
-        # Log ALL messages including pings
-        logger.info(f"<< WEBSOCKET MESSAGE RECEIVED: Type={type(message)}")
-
-        # Only log full content for non-ping messages (avoid spam)
-        if message != "pong":
-            logger.info(f"   Content: {message}")
-
         # Handle heartbeat responses
         if message == "pong":
             logger.debug("[HEARTBEAT] Pong received")
@@ -112,12 +105,11 @@ class IndWebSocket:
             self._on_pong(wsapp, message)
             return
 
+        logger.debug(f"<< WEBSOCKET MESSAGE RECEIVED: Type={type(message)}, Content={message}")
+
         try:
             # Parse JSON message
-            logger.info("[PARSING] Attempting to parse as JSON")
             parsed_message = json.loads(message)
-            logger.info(f"[OK] JSON parsed: {parsed_message}")
-            logger.info("[CALLBACK] Calling on_data with parsed message")
             self.on_data(wsapp, parsed_message)
         except json.JSONDecodeError as e:
             logger.error(f"[ERROR] Failed to parse JSON: {e}")

@@ -50,7 +50,7 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
         # grouped by mode in a few frames instead of one frame per symbol.
         self.subscription_queue = []
         self.batch_timer = None
-        self.batch_delay = 0.5  # 500ms window to collect subscriptions into a batch
+        self.batch_delay = 0.05  # 50ms window batches bursts without adding 500ms switch lag
 
     def initialize(
         self, broker_name: str, user_id: str, auth_data: dict[str, str] | None = None
@@ -422,13 +422,15 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
         # Generate correlation ID
         correlation_id = f"{symbol}_{exchange}_{mode}"
 
-        # Remove from subscriptions
-        should_disconnect = False
+        # Remove from subscriptions. Keep the broker WebSocket & ZMQ publisher alive
+        # even when subscriptions momentarily drop to 0 (e.g. a single-pane chart
+        # switching symbols sends unsubscribe(old) before subscribe(new)). The
+        # websocket_proxy server owns adapter.disconnect() when the last client leaves.
         with self.lock:
             if correlation_id in self.subscriptions:
                 del self.subscriptions[correlation_id]
             # Drop any still-queued (not-yet-flushed) subscription for this
-            # instrument+mode so a subscribe→unsubscribe within the 500ms batch
+            # instrument+mode so a subscribe→unsubscribe within the batch
             # window doesn't end up subscribing after the unsubscribe.
             self.subscription_queue = [
                 s
@@ -437,9 +439,6 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
                     s["instrument_token"] == instrument_token and s["mode"] == indmoney_mode
                 )
             ]
-            # Check if all subscriptions are removed
-            if len(self.subscriptions) == 0:
-                should_disconnect = True
             # Clear cached values for this symbol
             cache_key = f"{symbol}_{exchange}"
             if cache_key in self.last_values:
@@ -453,11 +452,6 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
             except Exception as e:
                 self.logger.error(f"Error unsubscribing from {symbol}.{exchange}: {e}")
                 return self._create_error_response("UNSUBSCRIPTION_ERROR", str(e))
-
-        # Disconnect from broker if no subscriptions remain
-        if should_disconnect:
-            self.logger.info("No subscriptions remaining, disconnecting from broker")
-            self.disconnect()
 
         return self._create_success_response(
             f"Unsubscribed from {symbol}.{exchange}", symbol=symbol, exchange=exchange, mode=mode
@@ -545,8 +539,8 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 self.logger.debug(f"Parsing JSON string: {message[:100]}...")
                 message = json.loads(message)
 
-            # Log all incoming messages for debugging
-            self.logger.info(f">> RAW INDMONEY DATA: {message}")
+            # Log incoming messages at DEBUG to keep the tick hot path fast.
+            self.logger.debug(f">> RAW INDMONEY DATA: {message}")
 
             # INDmoney sends data in JSON format
             # Expected format from API doc:
@@ -568,7 +562,7 @@ class IndmoneyWebSocketAdapter(BaseBrokerWebSocketAdapter):
             mode = message.get("mode")
             data = message.get("data", {})
 
-            self.logger.info(f"[DATA] Instrument={instrument}, Mode={mode}, Data={data}")
+            self.logger.debug(f"[DATA] Instrument={instrument}, Mode={mode}, Data={data}")
 
             if not instrument or not mode:
                 self.logger.warning(f"[WARN] Message missing instrument or mode: {message}")

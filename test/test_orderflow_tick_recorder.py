@@ -386,3 +386,60 @@ def test_orderflow_recorder_seeds_sell_side_for_flat_lower_circuit_quotes(tmp_pa
         rec.close()
 
 
+def test_indmoney_unsubscribe_last_symbol_keeps_connection_alive_for_symbol_switch():
+    """Unsubscribing the only active symbol during a chart symbol switch must NOT
+    disconnect the INDmoney WebSocket or tear down ZeroMQ; otherwise the immediate
+    next subscribe() lands on a permanently dead adapter."""
+    import websocket_proxy  # noqa: F401
+    from broker.indmoney.streaming.indmoney_adapter import IndmoneyWebSocketAdapter
+
+    adapter = IndmoneyWebSocketAdapter()
+    adapter.connected = True
+    adapter.running = True
+    unsub_calls = []
+
+    class DummyWsClient:
+        def unsubscribe(self, instruments, mode="ltp"):
+            unsub_calls.append((list(instruments), mode))
+
+        def subscribe(self, instruments, mode="ltp"):
+            pass
+
+        def close_connection(self):
+            pass
+
+    adapter.ws_client = DummyWsClient()
+    adapter.subscriptions = {
+        "MOREPENLAB_NSE_2": {
+            "symbol": "MOREPENLAB",
+            "exchange": "NSE",
+            "token": "4949",
+            "instrument_token": "NSE:4949",
+            "mode": 2,
+            "indmoney_mode": "quote",
+        }
+    }
+    disconnect_called = False
+    orig_disconnect = adapter.disconnect
+
+    def spy_disconnect():
+        nonlocal disconnect_called
+        disconnect_called = True
+        orig_disconnect()
+
+    adapter.disconnect = spy_disconnect
+
+    with patch(
+        "broker.indmoney.streaming.indmoney_adapter.SymbolMapper.get_token_from_symbol",
+        return_value={"token": "4949", "brexchange": "NSE"},
+    ):
+        res = adapter.unsubscribe("MOREPENLAB", "NSE", mode=2)
+
+    assert res["status"] == "success"
+    assert disconnect_called is False
+    assert adapter.connected is True
+    assert adapter.running is True
+    assert unsub_calls == [(["NSE:4949"], "quote")]
+    orig_disconnect()
+
+
