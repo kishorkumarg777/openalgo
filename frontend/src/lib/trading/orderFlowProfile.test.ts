@@ -364,4 +364,101 @@ describe('order flow profile', () => {
     expect(fp._bars.length).toBeGreaterThanOrEqual(400)
     expect(fp._bars[fp._bars.length - 1].time).toBe(manyBars[manyBars.length - 1].time)
   })
+
+  it('never paints green or red fills on zero-volume cells in profile, heatmap, or ladder styles', () => {
+    const t0 = 1_795_664_700
+    const feed = new OrderFlowFeed({
+      intervalSec: 60,
+      anchorSec: t0,
+      tickSize: 0.05,
+      rowTicks: 1,
+      minTradeSize: 0,
+      initialSide: 'ask',
+    })
+    // Top row: 0 | 333, middle row (gap via showEmptyRows): 0 | 0, bottom row: 66 | 0
+    feed.ingest({ ltp: 221.0, ltq: 333, timeSec: t0 + 1, side: 'ask' })
+    feed.ingest({ ltp: 220.9, ltq: 66, timeSec: t0 + 2, side: 'bid' })
+
+    const bar = { time: t0, open: 220.9, high: 221.0, low: 220.9, close: 221.0, volume: 399 }
+
+    const renderFills = (cellStyle: 'profile' | 'heatmap' | 'ladder') => {
+      const profile = createChartProfile(
+        'order-flow',
+        { ...settings(), cellStyle, rowSizeMode: 'manual', ticksPerRow: 1, showEmptyRows: true, showPoc: false, showValueArea: false, showBarCards: false },
+        { tickSize: 0.05, exchange: 'NSE', timezone: 'Asia/Kolkata', intervalSeconds: 60, orderFlow: () => feed }
+      )
+      profile.attached?.({ requestUpdate: vi.fn() })
+      profile.setBars([bar])
+
+      const fills: { x: number; y: number; w: number; h: number; style: string }[] = []
+      let currentStyle = ''
+      let pendingRect: { x: number; y: number; w: number; h: number } | null = null
+      const ctx = new Proxy(
+        {
+          set fillStyle(v: string) {
+            currentStyle = v
+          },
+          get fillStyle() {
+            return currentStyle
+          },
+          measureText: (text: string) => ({ width: text.length * 6 }),
+          roundRect: (x: number, y: number, w: number, h: number) => {
+            pendingRect = { x, y, w, h }
+          },
+          fill: () => {
+            if (pendingRect) {
+              fills.push({ ...pendingRect, style: currentStyle })
+              pendingRect = null
+            }
+          },
+        },
+        { get: (target, key) => (key in target ? Reflect.get(target, key) : () => {}) }
+      ) as unknown as CanvasRenderingContext2D
+
+      // Map prices cleanly: 221.00 -> y=100, 220.95 -> y=140, 220.90 -> y=180
+      const priceToY = (p: number) => 100 + ((221.0 - p) / 0.05) * 40
+      const rc = {
+        dpr: 1,
+        plotWidth: 400,
+        plotHeight: 300,
+        theme: {
+          background: '#131722',
+          upColor: '#26a69a',
+          downColor: '#ef5350',
+          axisText: '#9ca3af',
+        },
+        dataLayer: { timeToIndex: (t: number) => (t === t0 ? 1 : undefined) },
+        timeScale: {
+          barSpacing: 160,
+          indexToX: (idx: number) => idx * 160,
+          visibleRange: () => ({ from: 0, to: 3 }),
+        },
+        priceScale: { priceToY },
+      }
+      profile.draw(ctx, rc as never)
+      return fills
+    }
+
+    const isVisibleFill = (style: string) => !style.endsWith(',0)') && style !== 'transparent'
+
+    for (const style of ['profile', 'heatmap', 'ladder'] as const) {
+      const fills = renderFills(style).filter((f) => isVisibleFill(f.style))
+      // Match rows by vertical midpoint to avoid floating-point boundary jitter:
+      // 221.00 -> midY ~ 100, 220.95 (0|0) -> midY ~ 140, 220.90 (66|0) -> midY ~ 180.
+      const midY = (f: { y: number; h: number }) => f.y + f.h / 2
+
+      // Row 220.95 is 0 | 0 -> ZERO visible cell fills anywhere on that row!
+      const middleRowFills = fills.filter((f) => midY(f) >= 120 && midY(f) <= 160)
+      expect(middleRowFills, `${style}: empty 0|0 row must have no color fill`).toEqual([])
+
+      // Row 221.00 is 0 | 333 -> ONLY the ask (right) side has a visible fill!
+      const topRowFills = fills.filter((f) => midY(f) >= 80 && midY(f) < 120)
+      expect(topRowFills.length, `${style}: 0|333 must fill only ask side`).toBe(1)
+
+      // Row 220.90 is 66 | 0 -> ONLY the bid (left) side has a visible fill!
+      const bottomRowFills = fills.filter((f) => midY(f) > 160 && midY(f) <= 200)
+      expect(bottomRowFills.length, `${style}: 66|0 must fill only bid side`).toBe(1)
+      expect(bottomRowFills[0].x).toBeLessThan(topRowFills[0].x)
+    }
+  })
 })

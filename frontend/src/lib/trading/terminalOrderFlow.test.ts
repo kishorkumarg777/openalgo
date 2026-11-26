@@ -3,6 +3,7 @@
  * and indicator-legend collapse persistence across chart rebuilds.
  */
 import type { Bar, DataLoadingSnapshot } from 'openalgo-charts'
+import { readChartSettings } from 'openalgo-charts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SymbolView } from './terminal'
 import { TradingTerminal } from './terminal'
@@ -174,5 +175,23 @@ describe('Order Flow terminal ergonomics and continuity', () => {
     })
 
     expect(state.rawBars.at(-1)).toMatchObject(liveBar)
+  })
+
+  it('hides underlying candlestick bodies on Order Flow so barcolor indicators cannot bleed behind zero cells', async () => {
+    const { storage: s1 } = makeStorage()
+    const ofPane = await mount('order-flow', s1)
+    expect(readChartSettings(ofPane.state.chart as never)).toMatchObject({
+      'symbol.bodyVisible': false,
+      'symbol.borderVisible': false,
+      'symbol.wickVisible': false,
+    })
+
+    // Quote-only indices carry no traded quantity for footprints, so keep candles visible.
+    const { storage: s2 } = makeStorage()
+    const idxPane = await mount('order-flow', s2)
+    idxPane.state.sym = { ...idxPane.state.sym, symbol: 'NIFTY', exchange: 'NSE_INDEX', quoteOnly: true }
+    idxPane.state.buildChart()
+    await idxPane.state.chartToolsReady
+    expect(readChartSettings(idxPane.state.chart as never)['symbol.bodyVisible']).toBe(true)
   })
 })

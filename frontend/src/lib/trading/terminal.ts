@@ -1805,31 +1805,6 @@ export class TradingTerminal {
     this.setVolumeData(drawn, volumeUnderElements(drawn, raw))
   }
 
-  private orderFlowBarTimes(): Set<number> | null {
-    if (this.ctype !== 'order-flow' || !this.orderFlowFeed) return null
-    const bars = this.orderFlowFeed.bars()
-    if (!bars.length) return null
-    const times = new Set<number>()
-    for (const bar of bars) {
-      if (bar.cells.length > 0) times.add(bar.time)
-    }
-    return times.size ? times : null
-  }
-
-  private priceBarForDisplay(bar: Bar, footprintTimes = this.orderFlowBarTimes()): Bar {
-    const hasFootprint =
-      this.ctype === 'order-flow' &&
-      (footprintTimes?.has(bar.time) ||
-        (typeof bar.volume === 'number' && Number.isFinite(bar.volume) && bar.volume > 0))
-    if (!hasFootprint) return bar
-    return {
-      ...bar,
-      color: 'transparent',
-      wickColor: 'transparent',
-      borderColor: 'transparent',
-    }
-  }
-
   private setPriceData() {
     // History can finish during replay. Keep its live snapshot up to date,
     // but leave both displayed series and their timeline to the playhead.
@@ -1837,12 +1812,7 @@ export class TradingTerminal {
     if (!this.price || !this.volume || !this.rawBars.length) return
     // Always the raw bars. On a transformed chart type the chart forms the
     // elements from them, so a tick, history paging and replay all speak bars.
-    const footprintTimes = this.orderFlowBarTimes()
-    const priceBars =
-      this.ctype === 'order-flow'
-        ? this.rawBars.map((b) => this.priceBarForDisplay(b, footprintTimes))
-        : this.rawBars
-    this.price.setData(priceBars)
+    this.price.setData(this.rawBars)
     if (this.transformed()) this.setTransformedVolume(this.rawBars)
     else this.setVolumeData(this.rawBars)
     this.shownCount = this.shownBars.length
@@ -1984,7 +1954,7 @@ export class TradingTerminal {
     if (!this.price || !this.volume) return false
     // `update` appends or replaces by time on its own, which is exactly the
     // append-or-replace the caller has already applied to `rawBars`.
-    this.price.update(this.priceBarForDisplay(bar))
+    this.price.update(bar)
     if (this.transformed()) {
       this.setTransformedVolume(this.rawBars)
       this.shownCount = this.shownBars.length
@@ -2507,9 +2477,11 @@ export class TradingTerminal {
         ''
       )
     }
-    // Keep candlesticks visible on Order Flow for bars without footprint data;
-    // bars that do have footprint cells are hidden per-bar so Footprint draws them.
-    if (kind === 'order-flow') {
+    // Hide underlying candlestick geometry on profiles (including Order Flow on
+    // traded instruments) so neither raw candles nor indicator barcolor() calls
+    // paint solid green/red bodies behind footprint cells. Footprint draws its
+    // own crisp mini-candle on the left margin of each column.
+    if (kind === 'order-flow' && this.sym?.quoteOnly) {
       this.volume?.applyOptions({ visible: false })
     } else {
       this.hideProfileSeries()
@@ -8281,6 +8253,9 @@ export class TradingTerminal {
       if (average) this.volumeMA?.applyOptions(average.style)
       // The host volume switch stays authoritative across future chart rebuilds.
       this.setVolumeVisible(pane.volume)
+      if (isProfileKind(this.ctype) && !(this.ctype === 'order-flow' && this.sym?.quoteOnly)) {
+        this.hideProfileSeries()
+      }
     } finally {
       this.applyingIndicators = false
     }

@@ -1560,6 +1560,54 @@ function mergeFootprintCells(base: FootprintBar, live: FootprintBar, bar: Bar, r
 
 const MAX_ACTIVE_FOOTPRINT_BARS = 400
 
+type FootprintCellMethod = (
+  ctx: CanvasRenderingContext2D,
+  rc: PrimitiveRenderContext,
+  cell: FootprintCell,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  value: number,
+  peak: number,
+  textPeak: number,
+  fillColor: string,
+  buyColor: string,
+  sellColor: string,
+  bg: string,
+  hot: boolean,
+  textAlpha: number,
+  side: 'bid' | 'ask' | 'single',
+  explicitFill?: string,
+  label?: string
+) => void
+
+type FootprintWithCell = { _cell?: FootprintCellMethod }
+
+/** Return a 0-alpha copy of `bg` preserving RGB so contrast checks stay exact while painting nothing. */
+function transparentBackground(bg: string): string {
+  const s = bg.trim()
+  if (s.startsWith('#')) {
+    const hex = s.slice(1)
+    if (hex.length === 3 || hex.length === 4) {
+      const r = parseInt(hex[0] + hex[0], 16)
+      const g = parseInt(hex[1] + hex[1], 16)
+      const b = parseInt(hex[2] + hex[2], 16)
+      if (!Number.isNaN(r) && !Number.isNaN(g) && !Number.isNaN(b)) {
+        return `rgba(${r},${g},${b},0)`
+      }
+    } else if (hex.length === 6 || hex.length === 8) {
+      const n = parseInt(hex.slice(0, 6), 16)
+      if (!Number.isNaN(n)) {
+        return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},0)`
+      }
+    }
+  }
+  const m = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i.exec(s)
+  if (m) return `rgba(${Number(m[1])},${Number(m[2])},${Number(m[3])},0)`
+  return 'rgba(0,0,0,0)'
+}
+
 /**
  * Order Flow: the library's footprint, fed by the terminal's live feed for
  * real-time bars, real 1m intrabars for higher-timeframe history/mid-bar backfill,
@@ -1581,7 +1629,34 @@ class OrderFlowChartProfile implements ChartProfile {
     this.settings = settings
     this.context = context
     this.footprint = new Footprint(footprintOptions(settings, context))
+    this.installZeroCellGuard()
     this.sync()
+  }
+
+  /**
+   * In `heatmap` and `ladder` styles, Footprint._cell() paints a minimum
+   * directional red/green tint (8% / 18%) even when a cell's volume/delta is 0
+   * (empty `0 | 0` rows or the zero side of `0 | 100`). Passing a 0-alpha copy
+   * of the canvas background keeps zero cells completely unfilled while
+   * preserving accurate WCAG contrast and leaving `profile` & `imbalance` intact.
+   */
+  private installZeroCellGuard(): void {
+    const fp = this.footprint as unknown as FootprintWithCell
+    const origCell = fp._cell
+    if (typeof origCell !== 'function') return
+    fp._cell = (...args: Parameters<FootprintCellMethod>) => {
+      const value = args[7]
+      const bg = args[13]
+      const explicitFill = args[17]
+      if (
+        this.settings.cellStyle !== 'profile' &&
+        explicitFill === undefined &&
+        (!Number.isFinite(value) || value === 0)
+      ) {
+        args[17] = transparentBackground(bg)
+      }
+      return origCell.apply(fp, args)
+    }
   }
 
   private feed(): OrderFlowFeed | null {
