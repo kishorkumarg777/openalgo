@@ -220,6 +220,20 @@ class OrderFlowTickRecorder:
             st = self._states.get(key)
             if st is None:
                 st = _SymbolState()
+                # Seed initial tick-rule direction from session price context so a
+                # symbol pinned flat at its day low / lower circuit (without L1 book)
+                # is not misclassified as 100% aggressive buying.
+                ref_open = _positive_float(
+                    data.get("open") or data.get("prev_close") or data.get("prev_day_close")
+                )
+                ref_low = _positive_float(data.get("low"))
+                ref_high = _positive_float(data.get("high"))
+                if ref_open is not None and ltp < ref_open:
+                    st.prev_side = "bid"
+                elif ref_open is not None and ltp > ref_open:
+                    st.prev_side = "ask"
+                elif ref_low is not None and ref_high is not None and ref_high > ref_low:
+                    st.prev_side = "bid" if (ltp - ref_low) < (ref_high - ltp) else "ask"
                 self._states[key] = st
 
             if bid is not None:

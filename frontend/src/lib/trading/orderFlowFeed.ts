@@ -69,6 +69,8 @@ export interface OrderFlowFeedOptions {
   rowTicks: number
   /** Count only single prints of at least this quantity. 0 counts all. */
   minTradeSize: number
+  /** Starting tick-rule side for flat-price ticks before L1 quotes or a price change arrive. */
+  initialSide?: 'bid' | 'ask'
 }
 
 export class OrderFlowFeed {
@@ -76,6 +78,8 @@ export class OrderFlowFeed {
   private aggregator: FootprintAggregator
   private classify = createTradeClassifier('quote')
   private prevVolume: number | null = null
+  private firstTickPrice: number | null = null
+  private sideEstablished = false
   private ticks: FootprintTick[] = []
   private list: FootprintBar[] = []
   private snapshot: readonly FootprintBar[] = []
@@ -120,7 +124,16 @@ export class OrderFlowFeed {
     if (this.liveStartTime === null) this.liveStartTime = time
     const bid = typeof tick.bid === 'number' && tick.bid > 0 ? tick.bid : undefined
     const ask = typeof tick.ask === 'number' && tick.ask > 0 ? tick.ask : undefined
-    const side = this.classify({ price: tick.ltp, qty, bid, ask })
+    let side = this.classify({ price: tick.ltp, qty, bid, ask })
+    const hasBook = bid !== undefined && ask !== undefined && bid < ask
+    if (this.firstTickPrice === null) {
+      this.firstTickPrice = tick.ltp
+    }
+    if (hasBook || tick.ltp !== this.firstTickPrice) {
+      this.sideEstablished = true
+    } else if (!this.sideEstablished && this.opts.initialSide) {
+      side = this.opts.initialSide
+    }
     const print: FootprintTick = { time, price: tick.ltp, qty, side }
     this.lastTime = time
     this.lastQty = qty
@@ -278,5 +291,10 @@ export class OrderFlowFeed {
   /** Timestamp of the newest footprint bar, or null before any print arrives. */
   lastBarTime(): number | null {
     return this.list.length ? this.list[this.list.length - 1].time : null
+  }
+
+  /** Earliest recorded/hydrated tick timestamp (epoch sec), or null before any print arrives. */
+  earliestTickTime(): number | null {
+    return this.ticks.length ? this.ticks[0].time : null
   }
 }

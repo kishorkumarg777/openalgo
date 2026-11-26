@@ -350,3 +350,39 @@ def test_indmoney_short_daily_window_pads_fetch_and_filters_to_requested_range()
     assert list(df["close"]) == [304.7, 299.25]
 
 
+def test_orderflow_recorder_seeds_sell_side_for_flat_lower_circuit_quotes(tmp_path):
+    """When a symbol is pinned flat at its lower circuit below open without L1 book,
+    trades must classify as seller-initiated ('bid') rather than 100% buying."""
+    rec = _make_recorder(tmp_path)
+    now = int(time.time()) - 10
+    try:
+        # First quote sets baseline (open=88.05, pinned at low=87.05)
+        assert (
+            rec.record_market_data(
+                "MOREPENLAB",
+                "NSE",
+                2,
+                {"open": 88.05, "high": 89.40, "low": 87.05, "close": 87.05, "volume": 2520000},
+                now_sec=now,
+            )
+            is False
+        )
+        # Subsequent flat prints at 87.05 (no bid/ask in Quote packet)
+        assert (
+            rec.record_market_data(
+                "MOREPENLAB",
+                "NSE",
+                2,
+                {"open": 88.05, "high": 89.40, "low": 87.05, "close": 87.05, "volume": 2520733},
+                now_sec=now + 1,
+            )
+            is True
+        )
+        rec.flush()
+        ticks = rec.query_ticks("MOREPENLAB", "NSE")
+        assert len(ticks) == 1
+        assert ticks[0][1:] == [87.05, 733, 0]  # side=0 => bid (sell)
+    finally:
+        rec.close()
+
+

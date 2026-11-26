@@ -287,4 +287,55 @@ describe('order flow profile', () => {
     ])
     expect(profile.autoscaleInfo?.()).toBeNull()
   })
+
+  it('backfills pre-open volume from 1m intrabars and merges live prints when opened mid-bar', () => {
+    const t0 = 1_795_664_700 // 09:15 IST 4h bar open
+    const feed = new OrderFlowFeed({
+      intervalSec: 14_400,
+      anchorSec: t0,
+      tickSize: 0.05,
+      rowTicks: 5, // 0.25 rows
+      minTradeSize: 0,
+      initialSide: 'bid',
+    })
+    // User opens the 4h chart 2 hours into the bar; only 733 live shares arrived at 87.05.
+    feed.ingest({ ltp: 87.05, ltq: 733, timeSec: t0 + 7200 })
+
+    // 1m intrabars captured real volume across 89.40 -> 87.05 before 11:15.
+    const intrabars = [
+      { time: t0, open: 88.05, high: 89.4, low: 88.0, close: 89.0, volume: 1_000_000 },
+      { time: t0 + 60, open: 89.0, high: 89.0, low: 87.5, close: 87.6, volume: 900_000 },
+      { time: t0 + 120, open: 87.6, high: 87.6, low: 87.05, close: 87.05, volume: 620_000 },
+    ]
+    const profile = createChartProfile(
+      'order-flow',
+      { ...settings(), rowSizeMode: 'manual', ticksPerRow: 5 },
+      {
+        tickSize: 0.05,
+        exchange: 'NSE',
+        timezone: 'Asia/Kolkata',
+        intervalSeconds: 14_400,
+        orderFlow: () => feed,
+        intrabarBars: () => intrabars,
+      }
+    )
+    profile.attached?.({ requestUpdate: vi.fn() })
+    profile.setBars([
+      { time: t0, open: 88.05, high: 89.4, low: 87.05, close: 87.05, volume: 2_520_733 },
+    ])
+
+    const fp = (
+      profile as unknown as {
+        footprint: { _bars: { delta: number; cells: { price: number; bidVol: number; askVol: number }[] }[] }
+      }
+    ).footprint
+    const bar = fp._bars[0]
+    const totalVol = bar.cells.reduce((sum, c) => sum + c.bidVol + c.askVol, 0)
+    // Exact total exchange volume preserved (never dropped to just 733 shares!).
+    expect(totalVol).toBe(2_520_733)
+    // Spans the entire 87.00..89.50 price range instead of a single lone row at 87.05.
+    expect(bar.cells.length).toBeGreaterThanOrEqual(8)
+    // Live flat lower-circuit print at 87.05 was classified as sell (initialSide: 'bid').
+    expect(feed.bars()[0].delta).toBe(-733)
+  })
 })

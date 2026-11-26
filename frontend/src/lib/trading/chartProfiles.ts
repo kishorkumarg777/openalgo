@@ -9,6 +9,7 @@ import {
   zonedWallClockToUtcSeconds,
 } from 'openalgo-charts'
 import {
+  bucketPrice,
   compactVol,
   computeMarketProfile,
   computeVolumeProfileSessions,
@@ -51,6 +52,11 @@ export interface ChartProfileContext {
    * loads on demand and outlives the profile, so a chart rebuild keeps the bars.
    */
   orderFlow?: () => OrderFlowFeed | null
+  /**
+   * Order Flow only: lower-timeframe (1m) OHLCV bars used to reconstruct accurate
+   * minute-by-minute historical and mid-bar footprints for intervals > 1m.
+   */
+  intrabarBars?: () => readonly Bar[]
   /** Order Flow only: notifies the terminal of the active resolved row tick count. */
   onOrderFlowRowTicks?: (rowTicks: number) => void
 }
@@ -1390,8 +1396,172 @@ function buildHistoricalFootprintBar(bar: Bar, rowSize: number): FootprintBar | 
 }
 
 /**
+ * Reconstruct a parent bar's footprint from real lower-timeframe (1m) OHLCV
+ * intrabars (TradingView Volume Footprint style). When `targetVolume` is given,
+ * proportions are preserved while exact integer volume matches `targetVolume`.
+ */
+function buildIntrabarFootprintBar(
+  bar: Bar,
+  subBars: readonly Bar[],
+  rowSize: number,
+  targetVolume?: number
+): FootprintBar | null {
+  if (
+    !(rowSize > 0) ||
+    !Number.isFinite(rowSize) ||
+    !subBars.length ||
+    ![bar.time, bar.open, bar.high, bar.low, bar.close].every(Number.isFinite) ||
+    !(bar.open > 0 && bar.high > 0 && bar.low > 0 && bar.close > 0) ||
+    bar.high < bar.low
+  ) {
+    return null
+  }
+  const span = bar.high - bar.low
+  const step =
+    span / rowSize > MAX_PROFILE_ROWS
+      ? rowSize * Math.ceil(span / (rowSize * MAX_PROFILE_ROWS))
+      : rowSize
+
+  const byPrice = new Map<number, { bidVol: number; askVol: number }>()
+  let prevClose = bar.open
+  let rawTotal = 0
+  for (const sub of subBars) {
+    if (
+      ![sub.open, sub.high, sub.low, sub.close].every(Number.isFinite) ||
+      !(sub.open > 0 && sub.high > 0 && sub.low > 0 && sub.close > 0) ||
+      sub.high < sub.low ||
+      !(typeof sub.volume === 'number' && Number.isFinite(sub.volume) && sub.volume > 0)
+    ) {
+      continue
+    }
+    const subSpan = sub.high - sub.low
+    // Flat 1m bar (e.g. pinned at lower/upper circuit): infer bias from prior close
+    // or parent bar direction rather than neutral 50/50.
+    let subForDist = sub
+    if (subSpan === 0 && sub.close === sub.open) {
+      if (sub.close < prevClose || (sub.close === prevClose && bar.close < bar.open && sub.close <= bar.low)) {
+        subForDist = { ...sub, open: sub.close + 1e-6 }
+      } else if (
+        sub.close > prevClose ||
+        (sub.close === prevClose && bar.close > bar.open && sub.close >= bar.high)
+      ) {
+        subForDist = { ...sub, open: Math.max(1e-6, sub.close - 1e-6) }
+      }
+    }
+    const subFp = buildHistoricalFootprintBar(subForDist, step)
+    prevClose = sub.close
+    if (!subFp) continue
+    for (const c of subFp.cells) {
+      const p = bucketPrice(c.price, step)
+      const acc = byPrice.get(p)
+      if (acc) {
+        acc.bidVol += c.bidVol
+        acc.askVol += c.askVol
+      } else {
+        byPrice.set(p, { bidVol: c.bidVol, askVol: c.askVol })
+      }
+      rawTotal += c.bidVol + c.askVol
+    }
+  }
+  if (!byPrice.size || rawTotal <= 0) return null
+
+  const entries = Array.from(byPrice.entries()).sort((a, b) => b[0] - a[0])
+  const desired =
+    typeof targetVolume === 'number' && Number.isFinite(targetVolume) && targetVolume > 0
+      ? Math.round(targetVolume)
+      : rawTotal
+
+  const cells: FootprintCell[] = []
+  let delta = 0
+  if (desired === rawTotal) {
+    for (const [price, v] of entries) {
+      if (v.bidVol + v.askVol <= 0) continue
+      cells.push({ price, bidVol: v.bidVol, askVol: v.askVol })
+      delta += v.askVol - v.bidVol
+    }
+  } else {
+    const scale = desired / rawTotal
+    const exactTotals = entries.map(([, v]) => (v.bidVol + v.askVol) * scale)
+    const rowTotals = exactTotals.map((x) => Math.floor(x))
+    let rem = desired - rowTotals.reduce((s, x) => s + x, 0)
+    if (rem > 0) {
+      const order = exactTotals
+        .map((x, idx) => ({ idx, frac: x - rowTotals[idx] }))
+        .sort((a, b) => b.frac - a.frac)
+      for (let k = 0; k < rem && k < order.length; k++) rowTotals[order[k].idx] += 1
+    }
+    for (let i = 0; i < entries.length; i++) {
+      const total = rowTotals[i]
+      if (total <= 0) continue
+      const [price, v] = entries[i]
+      const origTotal = v.bidVol + v.askVol
+      const askRatio = origTotal > 0 ? v.askVol / origTotal : 0.5
+      const askVol = Math.round(total * askRatio)
+      const bidVol = Math.max(0, total - askVol)
+      cells.push({ price, bidVol, askVol })
+      delta += askVol - bidVol
+    }
+  }
+  if (!cells.length) return null
+
+  return {
+    time: bar.time,
+    cells,
+    delta,
+    rowSize: step,
+    open: bar.open,
+    high: bar.high,
+    low: bar.low,
+    close: bar.close,
+  }
+}
+
+/** Additively combine a reconstructed pre-open base with real live prints. */
+function mergeFootprintCells(base: FootprintBar, live: FootprintBar, bar: Bar, rowSize: number): FootprintBar {
+  const step = live.rowSize && live.rowSize > 0 ? live.rowSize : rowSize
+  const byPrice = new Map<number, { bidVol: number; askVol: number }>()
+  for (const c of base.cells) {
+    const p = bucketPrice(c.price, step)
+    const acc = byPrice.get(p)
+    if (acc) {
+      acc.bidVol += c.bidVol
+      acc.askVol += c.askVol
+    } else {
+      byPrice.set(p, { bidVol: c.bidVol, askVol: c.askVol })
+    }
+  }
+  for (const c of live.cells) {
+    const p = bucketPrice(c.price, step)
+    const acc = byPrice.get(p)
+    if (acc) {
+      acc.bidVol += c.bidVol
+      acc.askVol += c.askVol
+    } else {
+      byPrice.set(p, { bidVol: c.bidVol, askVol: c.askVol })
+    }
+  }
+  const cells: FootprintCell[] = Array.from(byPrice.entries())
+    .sort((a, b) => b[0] - a[0])
+    .map(([price, v]) => ({ price, bidVol: v.bidVol, askVol: v.askVol }))
+  let delta = 0
+  for (const c of cells) delta += c.askVol - c.bidVol
+  return {
+    ...live,
+    time: bar.time,
+    cells,
+    delta,
+    rowSize: step,
+    open: bar.open,
+    high: Math.max(bar.high, live.high ?? bar.high),
+    low: Math.min(bar.low, live.low ?? bar.low),
+    close: bar.close,
+  }
+}
+
+/**
  * Order Flow: the library's footprint, fed by the terminal's live feed for
- * real-time bars and approximated from OHLCV history for older bars.
+ * real-time bars, real 1m intrabars for higher-timeframe history/mid-bar backfill,
+ * and OHLCV reconstruction when finer bars are unavailable.
  */
 class OrderFlowChartProfile implements ChartProfile {
   private footprint: Footprint
@@ -1428,11 +1598,25 @@ class OrderFlowChartProfile implements ChartProfile {
     return ticks
   }
 
-  private historicalBar(bar: Bar, rowSize: number): FootprintBar | null {
-    const key = `${bar.open}|${bar.high}|${bar.low}|${bar.close}|${bar.volume ?? 0}|${rowSize}`
+  private historicalBar(
+    bar: Bar,
+    rowSize: number,
+    subBars: readonly Bar[] | undefined,
+    targetVolume?: number
+  ): FootprintBar | null {
+    const subTag = subBars?.length
+      ? `${subBars.length}:${subBars[0].time}:${subBars[subBars.length - 1].time}:${subBars[subBars.length - 1].volume ?? 0}`
+      : '0'
+    const effVol = targetVolume ?? bar.volume ?? 0
+    const key = `${bar.open}|${bar.high}|${bar.low}|${bar.close}|${effVol}|${rowSize}|${subTag}`
     const cached = this.historicalCache.get(bar.time)
     if (cached && cached.key === key) return cached.fp
-    const fp = buildHistoricalFootprintBar(bar, rowSize)
+    const fp =
+      (subBars?.length ? buildIntrabarFootprintBar(bar, subBars, rowSize, targetVolume) : null) ??
+      buildHistoricalFootprintBar(
+        targetVolume !== undefined ? { ...bar, volume: targetVolume } : bar,
+        rowSize
+      )
     this.historicalCache.set(bar.time, { key, fp })
     return fp
   }
@@ -1451,10 +1635,30 @@ class OrderFlowChartProfile implements ChartProfile {
     for (const bar of liveBars) {
       if (bar.cells.length > 0) liveByTime.set(bar.time, bar)
     }
+    const earliestTick = feed?.earliestTickTime() ?? null
+
+    // Group any available 1m intrabars by parent bar in O(N + M).
+    const intrabars = this.context.intrabarBars?.() ?? []
+    const intervalSec = Math.max(60, this.context.intervalSeconds || 60)
+    let subCursor = 0
 
     const rowSize = tickSize * rowTicks
     const merged: FootprintBar[] = []
-    for (const bar of this.sourceBars) {
+    for (let i = 0; i < this.sourceBars.length; i++) {
+      const bar = this.sourceBars[i]
+      let subBars: Bar[] | undefined
+      if (intrabars.length > 0 && intervalSec > 60) {
+        const nextBarTime = i + 1 < this.sourceBars.length ? this.sourceBars[i + 1].time : Number.POSITIVE_INFINITY
+        const barEnd = Math.min(nextBarTime, bar.time + intervalSec)
+        while (subCursor < intrabars.length && intrabars[subCursor].time < bar.time) subCursor++
+        let scan = subCursor
+        while (scan < intrabars.length && intrabars[scan].time < barEnd) scan++
+        if (scan > subCursor) {
+          subBars = intrabars.slice(subCursor, scan)
+          subCursor = scan
+        }
+      }
+
       const live = liveByTime.get(bar.time)
       if (live) {
         const barValid =
@@ -1467,22 +1671,56 @@ class OrderFlowChartProfile implements ChartProfile {
           bar.low > 0 &&
           bar.close > 0 &&
           bar.high >= bar.low
-        // Preserve the candle's full OHLC wick envelope when a live feed starts
-        // mid-bar, while keeping the live bar's real recorded cells intact.
-        merged.push(
-          barValid
-            ? {
-                ...live,
-                open: bar.open,
-                high: Math.max(bar.high, live.high ?? bar.high),
-                low: Math.min(bar.low, live.low ?? bar.low),
-                close: bar.close,
-              }
-            : live
-        )
+        const liveVol = live.cells.reduce((sum, c) => sum + c.bidVol + c.askVol, 0)
+        const barVol =
+          typeof bar.volume === 'number' && Number.isFinite(bar.volume) && bar.volume > 0
+            ? Math.round(bar.volume)
+            : 0
+        // If recording started mid-bar (e.g. opened a 4h chart 2h into the candle),
+        // backfill the unrecorded pre-open volume via 1m intrabars or OHLCV and
+        // additively merge the live recorded prints on top so total volume matches.
+        const startedMidBar = earliestTick !== null && earliestTick > bar.time
+        const missingVol =
+          barValid && this.settings.minTradeSize === 0 && startedMidBar && barVol > liveVol
+            ? barVol - liveVol
+            : 0
+        if (missingVol > 0 && earliestTick !== null) {
+          const cutoff = earliestTick
+          const preOpenSubs = subBars?.filter((s) => s.time < cutoff)
+          const base = this.historicalBar(
+            bar,
+            rowSize,
+            preOpenSubs?.length ? preOpenSubs : subBars,
+            missingVol
+          )
+          merged.push(
+            base
+              ? mergeFootprintCells(base, live, bar, rowSize)
+              : {
+                  ...live,
+                  open: bar.open,
+                  high: Math.max(bar.high, live.high ?? bar.high),
+                  low: Math.min(bar.low, live.low ?? bar.low),
+                  close: bar.close,
+                }
+          )
+        } else {
+          // Bar recorded from its open (or minTradeSize filter active): keep pure live tape.
+          merged.push(
+            barValid
+              ? {
+                  ...live,
+                  open: bar.open,
+                  high: Math.max(bar.high, live.high ?? bar.high),
+                  low: Math.min(bar.low, live.low ?? bar.low),
+                  close: bar.close,
+                }
+              : live
+          )
+        }
         liveByTime.delete(bar.time)
       } else {
-        const fp = this.historicalBar(bar, rowSize)
+        const fp = this.historicalBar(bar, rowSize, subBars)
         if (fp) merged.push(fp)
       }
     }

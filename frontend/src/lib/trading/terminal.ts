@@ -1245,6 +1245,7 @@ export class TradingTerminal {
    * profile, so a settings change or a rebuild keeps the bars gathered so far.
    */
   private orderFlowFeed: OrderFlowFeed | null = null
+  private orderFlowIntrabars: readonly Bar[] = []
   private orderFlowGeneration = 0
   private orderFlowRowTicks = 10
   private orderFlowRecording = true
@@ -2460,6 +2461,7 @@ export class TradingTerminal {
       intervalSeconds: intervalSeconds(this.interval) ?? 300,
       priceScale: () => price.priceScale(),
       orderFlow: () => this.orderFlowFeed,
+      intrabarBars: () => this.orderFlowIntrabars,
       onOrderFlowRowTicks: (rowTicks: number) => {
         if (this.orderFlowRowTicks !== rowTicks) {
           this.orderFlowRowTicks = rowTicks
@@ -6967,18 +6969,29 @@ export class TradingTerminal {
   private startOrderFlowFeed(intervalSec: number | null): void {
     const generation = ++this.orderFlowGeneration
     this.orderFlowFeed = null
+    this.orderFlowIntrabars = []
     this.orderFlowSyncing = false
     if (this.ctype !== 'order-flow' || !intervalSec) {
       this.emitOrderFlowState(true)
       return
     }
-    const anchorSec = this.rawBars[this.rawBars.length - 1]?.time ?? 0
+    const lastBar = this.rawBars[this.rawBars.length - 1]
+    const anchorSec = lastBar?.time ?? 0
+    const initialSide: 'bid' | 'ask' | undefined =
+      lastBar && lastBar.close < lastBar.open
+        ? 'bid'
+        : lastBar && lastBar.close > lastBar.open
+          ? 'ask'
+          : undefined
     const startTime = this.rawBars[0]?.time
     const endTime = nowSec() + intervalSec
     const tickSize = this.tick()
     const saved = readProfileSettings('order-flow', this.chartSettingsSaved)
     this.orderFlowRowTicks = saved.ticksPerRow
     this.emitOrderFlowState(true)
+    if (intervalSec > 60) {
+      void this.loadOrderFlowIntrabars(generation)
+    }
     void import('./orderFlowFeed')
       .then(({ OrderFlowFeed }) => {
         if (generation !== this.orderFlowGeneration || this.destroyed) return
@@ -6988,12 +7001,47 @@ export class TradingTerminal {
           tickSize,
           rowTicks: saved.ticksPerRow,
           minTradeSize: saved.minTradeSize,
+          initialSide,
         })
         this.profileLayer?.refresh(true)
         this.emitOrderFlowState(true)
         void this.hydrateOrderFlowFeed(generation, startTime, endTime)
       })
       .catch((error) => this.toast(`Order Flow could not start: ${this.cleanError(error)}`, 'err'))
+  }
+
+  /**
+   * Fetch recent 1m OHLCV intrabars for higher-timeframe Order Flow charts
+   * (5m..4h) so historical bars and mid-bar live candles reconstruct accurate
+   * minute-by-minute volume distribution instead of coarse single-bar guesses.
+   */
+  private async loadOrderFlowIntrabars(generation: number): Promise<void> {
+    const sym = this.sym
+    const feed = this.cachedBars ?? this.rest
+    if (!sym || sym.synthetic || sym.quoteOnly || !feed || !this.rawBars.length) return
+    if (this.availableIntervals.length && !this.availableIntervals.includes('1m')) return
+    const to = nowSec()
+    // Cap to 6 calendar days (1 single fast broker chunk) covering recent visible columns.
+    const earliestNeeded = this.rawBars[Math.max(0, this.rawBars.length - 16)]?.time ?? to - 6 * 86400
+    const from = Math.max(earliestNeeded, to - 6 * 86400)
+    try {
+      const bars = await feed.getBars({
+        symbol: sym.symbol,
+        exchange: sym.exchange,
+        interval: '1m',
+        from,
+        to,
+      })
+      if (generation !== this.orderFlowGeneration || this.destroyed || this.ctype !== 'order-flow') {
+        return
+      }
+      if (bars.length > 0) {
+        this.orderFlowIntrabars = bars
+        this.profileLayer?.refresh(true)
+      }
+    } catch {
+      /* Stay cleanly on live tape + OHLCV reconstruction if 1m history is unavailable. */
+    }
   }
 
   /* ── live data for a combination: one LTP stream per leg, folded per tick ── */
@@ -7258,6 +7306,7 @@ export class TradingTerminal {
     const feed = this.exprFeed ?? new ExpressionFeed(inner, () => this.exprLegExchange)
     this.builder = null
     this.orderFlowFeed = null
+    this.orderFlowIntrabars = []
     this.orderFlowGeneration += 1
     let bars: readonly Bar[]
     try {
@@ -7485,6 +7534,7 @@ export class TradingTerminal {
     // `this.data` (e.g. a 1m 13:00 bar corrupting a 1h 12:15 chart).
     this.builder = null
     this.orderFlowFeed = null
+    this.orderFlowIntrabars = []
     this.orderFlowGeneration += 1
     let bars: readonly Bar[]
     try {
